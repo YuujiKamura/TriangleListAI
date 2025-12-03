@@ -1,13 +1,13 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { RenderedTriangle, TriangleDef, AIAnalysisResult, ToolMode } from './types';
-import { generateId, recalculateGeometry, calculateAttachedTriangle } from './utils/geometryUtils';
+import { generateId, recalculateGeometry, calculateAttachedTriangle, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
 import { PALETTE } from './constants';
 import { analyzeGeometry } from './services/geminiService';
 import GeometryCanvas from './components/GeometryCanvas';
 import TriangleListItem from './components/TriangleListItem';
 import InputPanel from './components/Toolbar';
-import { BrainCircuit, Sparkles, Calculator } from 'lucide-react';
+import { BrainCircuit, Sparkles, Calculator, RefreshCw, Download } from 'lucide-react';
+import { downloadDXF } from './utils/dxfExport';
 
 const App: React.FC = () => {
   // State: The Definition is the source of truth
@@ -104,7 +104,12 @@ const App: React.FC = () => {
     setSelectedEdge(null); // Clear selection after add
   };
 
-  const handleCanvasAddTriangle = (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number) => {
+  const handleCanvasAddTriangle = (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => {
+    // Validate that both sides are positive and valid
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return; // Don't add invalid triangle
+    }
+
     const newDef: TriangleDef = {
       id: generateId(),
       name: `T${defs.length + 1}`,
@@ -114,9 +119,39 @@ const App: React.FC = () => {
       attachedEdgeIndex: edgeIndex,
       sideLeft: parseFloat(sideLeft.toFixed(2)),
       sideRight: parseFloat(sideRight.toFixed(2)),
-      flip: false // Assume default for now; user can flip in details if needed later
+      flip: flip
     };
     setDefs([...defs, newDef]);
+    setSelectedEdge(null); // Clear selection after adding
+  };
+
+  const handleVertexReshape = (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => {
+    // Validate that both sides are positive and valid
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return;
+    }
+
+    setDefs(defs.map(d => {
+      if (d.id !== triangleId) return d;
+
+      if (d.isRoot) {
+        // For root triangle, update sideB (left) and sideC (right), keep sideA (base)
+        return {
+          ...d,
+          sideB: parseFloat(sideLeft.toFixed(2)),
+          sideC: parseFloat(sideRight.toFixed(2)),
+          flip: flip
+        };
+      } else {
+        // For attached triangle, update sideLeft and sideRight
+        return {
+          ...d,
+          sideLeft: parseFloat(sideLeft.toFixed(2)),
+          sideRight: parseFloat(sideRight.toFixed(2)),
+          flip: flip
+        };
+      }
+    }));
   };
 
   const handleEdit = (id: string) => {
@@ -150,9 +185,60 @@ const App: React.FC = () => {
   };
 
   // Direct dimension update from Canvas
-  const handleDimensionUpdate = (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number) => {
-    if (isNaN(newValue) || newValue <= 0) return;
+  const handleDimensionUpdate = (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number): boolean => {
+    if (isNaN(newValue) || newValue <= 0) {
+      alert('値は0より大きい数値である必要があります。');
+      return false;
+    }
 
+    const triangleDef = defs.find(d => d.id === triangleId);
+    if (!triangleDef) return false;
+
+    // Validate before updating
+    if (triangleDef.isRoot) {
+      // Root Mapping: 0=A, 1=C, 2=B (See utils/geometryUtils.ts)
+      let sideA = triangleDef.sideA || 0;
+      let sideB = triangleDef.sideB || 0;
+      let sideC = triangleDef.sideC || 0;
+      
+      if (edgeIndex === 0) sideA = newValue;
+      else if (edgeIndex === 1) sideC = newValue;
+      else if (edgeIndex === 2) sideB = newValue;
+
+      if (!isValidRootTriangle(sideA, sideB, sideC)) {
+        alert('三角形として成立しません。\n任意の2辺の和が残りの1辺より大きい必要があります。');
+        return false;
+      }
+    } else {
+      // Attached Mapping: 0=Ref, 1=R, 2=L
+      if (edgeIndex === 0) return false; // Ref is locked to parent
+      
+      // Get parent triangle to find reference edge length
+      const parentTriangle = geometry.triangles.find(t => t.id === triangleDef.attachedToTriangleId);
+      if (!parentTriangle) return false;
+
+      let refEdge = 0;
+      if (triangleDef.attachedEdgeIndex === 0) {
+        refEdge = distance(parentTriangle.p1, parentTriangle.p2);
+      } else if (triangleDef.attachedEdgeIndex === 1) {
+        refEdge = distance(parentTriangle.p2, parentTriangle.p3);
+      } else {
+        refEdge = distance(parentTriangle.p3, parentTriangle.p1);
+      }
+
+      let sideLeft = triangleDef.sideLeft || 0;
+      let sideRight = triangleDef.sideRight || 0;
+
+      if (edgeIndex === 1) sideRight = newValue;
+      else if (edgeIndex === 2) sideLeft = newValue;
+
+      if (!isValidAttachedTriangle(refEdge, sideLeft, sideRight)) {
+        alert('三角形として成立しません。\n参照辺の長さが他の2辺の和より小さい必要があります。');
+        return false;
+      }
+    }
+
+    // Update if validation passed
     setDefs(prevDefs => prevDefs.map(d => {
       if (d.id !== triangleId) return d;
 
@@ -169,6 +255,7 @@ const App: React.FC = () => {
       }
       return d;
     }));
+    return true;
   };
 
   const handleDelete = (id: string) => {
@@ -189,10 +276,17 @@ const App: React.FC = () => {
     }
   };
 
+  const handleReload = () => {
+    if (window.confirm("ページをリロードしますか？未保存の変更は失われます。")) {
+      window.location.reload();
+    }
+  };
+
   const handleEdgeDoubleClick = (tId: string, edgeIndex: 0 | 1 | 2) => {
-      setEditingId(tId);
-      setSelectedTriangleId(tId);
-      setSelectedEdge(null);
+      // Enter phantom mode for attaching a new triangle
+      if (!editingId) {
+        setSelectedEdge({ triangleId: tId, edgeIndex: edgeIndex });
+      }
   };
 
   const handleBackgroundClick = () => {
@@ -244,6 +338,24 @@ const App: React.FC = () => {
     ? geometry.triangles.find(t => t.id === selectedEdge.triangleId)?.name 
     : '';
 
+  // Calculate which edges are already occupied (have a child triangle attached)
+  // Format: "triangleId-edgeIndex"
+  // We need to mark BOTH the parent's edge AND the child's Ref edge (index 0) as occupied
+  const occupiedEdges = useMemo(() => {
+    const occupied = new Set<string>();
+    defs.forEach(d => {
+      if (!d.isRoot && d.attachedToTriangleId !== undefined && d.attachedEdgeIndex !== undefined) {
+        // Mark the parent's edge as occupied
+        const parentEdgeKey = `${d.attachedToTriangleId}-${d.attachedEdgeIndex}`;
+        occupied.add(parentEdgeKey);
+        // Mark the child's Ref edge (edge 0) as occupied too
+        const childRefEdgeKey = `${d.id}-0`;
+        occupied.add(childRefEdgeKey);
+      }
+    });
+    return occupied;
+  }, [defs]);
+
   // Calculate Phantom Triangle (Preview)
   const phantomTriangle = useMemo(() => {
     if (!selectedEdge || !inputMode || inputMode !== 'ATTACH') return null;
@@ -288,6 +400,22 @@ const App: React.FC = () => {
             </div>
         </div>
         <div className="flex items-center gap-2">
+             <button
+                 onClick={handleReload}
+                 className="text-xs text-blue-600 font-medium px-3 py-1.5 hover:bg-blue-50 rounded transition-colors flex items-center gap-1.5"
+                 title="ページをリロード"
+             >
+                 <RefreshCw size={14} />
+                 リロード
+             </button>
+             <button
+                 onClick={() => downloadDXF(geometry.triangles)}
+                 className="text-xs text-green-600 font-medium px-3 py-1.5 hover:bg-green-50 rounded transition-colors flex items-center gap-1.5"
+                 title="DXF形式でエクスポート"
+             >
+                 <Download size={14} />
+                 DXF
+             </button>
              <button onClick={handleClear} className="text-xs text-red-600 font-medium px-3 py-1.5 hover:bg-red-50 rounded transition-colors">
                  Reset All
              </button>
@@ -313,9 +441,11 @@ const App: React.FC = () => {
             onEdgeDoubleClick={handleEdgeDoubleClick}
             onDimensionChange={handleDimensionUpdate}
             onAddAttachedTriangle={handleCanvasAddTriangle}
+            onVertexReshape={handleVertexReshape}
             onPhantomClick={handlePhantomClick}
             onBackgroundClick={handleBackgroundClick}
             selectedEdge={selectedEdge}
+            occupiedEdges={occupiedEdges}
           />
 
           {/* Prompt Overlay */}

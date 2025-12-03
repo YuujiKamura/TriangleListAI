@@ -86,7 +86,7 @@ export const calculateAttachedTriangle = (
             color: def.color || '#e2e8f0',
             area,
             paramId: def.id || 'phantom',
-            edgeLabels: ['Ref', 'R', 'L']
+            edgeLabels: ['Ref', 'C', 'B']
         };
     }
     return null;
@@ -157,4 +157,16 @@ export const getCentroid = (t: RenderedTriangle): Point => {
         x: (t.p1.x + t.p2.x + t.p3.x) / 3,
         y: (t.p1.y + t.p2.y + t.p3.y) / 3
     };
+};
+
+// Validate triangle inequality for root triangle
+export const isValidRootTriangle = (sideA: number, sideB: number, sideC: number): boolean => {
+    if (sideA <= 0 || sideB <= 0 || sideC <= 0) return false;
+    return (sideA + sideB > sideC) && (sideB + sideC > sideA) && (sideC + sideA > sideB);
+};
+
+// Validate triangle inequality for attached triangle
+export const isValidAttachedTriangle = (refEdge: number, sideLeft: number, sideRight: number): boolean => {
+    if (refEdge <= 0 || sideLeft <= 0 || sideRight <= 0) return false;
+    return (refEdge < sideLeft + sideRight) && (sideLeft < refEdge + sideRight) && (sideRight < refEdge + sideLeft);
 };

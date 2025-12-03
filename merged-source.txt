@@ -1,0 +1,2209 @@
+// ============================================================
+// TriangleListAI - Merged Source Code
+// Generated for Google AI Studio analysis
+// ============================================================
+
+
+// ============================================================
+// FILE: ./types.ts
+// ============================================================
+
+
+export interface Point {
+  id: string;
+  x: number;
+  y: number;
+  label?: string;
+}
+
+export interface RenderedTriangle {
+  id: string;
+  name: string;
+  p1: Point;
+  p2: Point;
+  p3: Point;
+  color: string;
+  area: number;
+  paramId: string; // Link back to the definition
+  edgeLabels: [string, string, string]; // Labels for p1-p2, p2-p3, p3-p1
+}
+
+// The source of truth
+export interface TriangleDef {
+  id: string;
+  name: string;
+  color: string;
+  
+  // For the very first triangle (Root)
+  isRoot: boolean;
+  sideA?: number; // Base
+  sideB?: number; // Left
+  sideC?: number; // Right
+
+  // For attached triangles
+  attachedToTriangleId?: string;
+  attachedEdgeIndex?: 0 | 1 | 2; // 0=p1-p2, 1=p2-p3, 2=p3-p1
+  sideLeft?: number;  // Distance from edge start
+  sideRight?: number; // Distance from edge end
+  flip?: boolean;     // Flip across the base edge
+}
+
+export interface GeometryData {
+  points: Point[];
+  triangles: RenderedTriangle[];
+}
+
+export enum ToolMode {
+  VIEW = 'VIEW',
+  ADD_TRIANGLE = 'ADD_TRIANGLE',
+  DELETE = 'DELETE'
+}
+
+export interface AIAnalysisResult {
+  text: string;
+  loading: boolean;
+  error?: string;
+}
+
+// ============================================================
+// FILE: ./constants.ts
+// ============================================================
+
+
+export const CANVAS_WIDTH = 800;
+export const CANVAS_HEIGHT = 600;
+export const GRID_SIZE = 5; // Default grid size in meters
+
+export const PALETTE = [
+  '#3b82f6', // blue-500
+  '#ef4444', // red-500
+  '#10b981', // emerald-500
+  '#f59e0b', // amber-500
+  '#8b5cf6', // violet-500
+  '#ec4899', // pink-500
+  '#06b6d4', // cyan-500
+];
+
+export const INITIAL_INSTRUCTION = `
+1. Create a Base Triangle by specifying 3 side lengths (meters).
+2. Click any edge on the canvas to attach a new triangle.
+3. Use the list to manage your shapes.
+`;
+
+
+// ============================================================
+// FILE: ./utils/geometryUtils.ts
+// ============================================================
+
+
+import { Point, TriangleDef, RenderedTriangle } from '../types';
+
+export const generateId = (): string => Math.random().toString(36).substring(2, 9);
+
+export const distance = (p1: Point, p2: Point): number => {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+};
+
+// Calculate coordinates of P3 given P1, P2 and lengths L13 (p1-p3), L23 (p2-p3)
+// This uses circle intersection logic
+export const calculateThirdPoint = (
+  p1: Point,
+  p2: Point,
+  L13: number,
+  L23: number,
+  flip: boolean
+): Point | null => {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+
+  // Triangle inequality check
+  if (d > L13 + L23 || d < Math.abs(L13 - L23) || d === 0) {
+    return null; // Impossible to form a triangle
+  }
+
+  // Calculate the point along the line P1-P2 where the altitude hits
+  const a = (L13 * L13 - L23 * L23 + d * d) / (2 * d);
+  
+  // Calculate the height of the triangle
+  const h = Math.sqrt(Math.max(0, L13 * L13 - a * a));
+
+  // Calculate coordinates
+  // (x2, y2) is the base point on the line
+  const x2 = p1.x + (dx * a) / d;
+  const y2 = p1.y + (dy * a) / d;
+
+  // Offset by height in the perpendicular direction
+  // If flip is true, we subtract, otherwise add (or vice versa depending on system)
+  // SVG coordinates: y increases downwards. 
+  // Perpendicular vector to (dx, dy) is (-dy, dx) or (dy, -dx)
+  
+  const sign = flip ? -1 : 1;
+  const rx = x2 + sign * (h * -dy) / d;
+  const ry = y2 + sign * (h * dx) / d;
+
+  return {
+    id: generateId(),
+    x: rx,
+    y: ry,
+    label: ''
+  };
+};
+
+export const calculateHeronArea = (a: number, b: number, c: number): number => {
+    const s = (a + b + c) / 2;
+    return Math.sqrt(Math.max(0, s * (s - a) * (s - b) * (s - c)));
+};
+
+// Helper to calculate a single attached triangle
+export const calculateAttachedTriangle = (
+    parent: RenderedTriangle,
+    def: Partial<TriangleDef> & { sideLeft: number, sideRight: number, attachedEdgeIndex: 0 | 1 | 2 }
+): RenderedTriangle | null => {
+    let baseP1: Point, baseP2: Point;
+    
+    // Determine base edge
+    if (def.attachedEdgeIndex === 0) { baseP1 = parent.p1; baseP2 = parent.p2; }
+    else if (def.attachedEdgeIndex === 1) { baseP1 = parent.p2; baseP2 = parent.p3; }
+    else { baseP1 = parent.p3; baseP2 = parent.p1; }
+
+    const pNew = calculateThirdPoint(baseP1, baseP2, def.sideLeft, def.sideRight, !!def.flip);
+    
+    if (pNew) {
+        pNew.id = `p_${def.id || 'phantom'}_3`;
+        const baseLen = distance(baseP1, baseP2);
+        const area = calculateHeronArea(baseLen, def.sideLeft, def.sideRight);
+        
+        return {
+            id: def.id || 'phantom',
+            name: def.name || 'Phantom',
+            p1: baseP1,
+            p2: baseP2,
+            p3: pNew,
+            color: def.color || '#e2e8f0',
+            area,
+            paramId: def.id || 'phantom',
+            edgeLabels: ['Ref', 'C', 'B']
+        };
+    }
+    return null;
+};
+
+// Re-computes the entire geometry based on the definitions
+export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], triangles: RenderedTriangle[] } => {
+    let points: Point[] = [];
+    let triangles: RenderedTriangle[] = [];
+
+    // Map to quickly find triangle coordinates by ID
+    const triangleMap = new Map<string, RenderedTriangle>();
+
+    // Sort defs to ensure parents are processed before children
+    for (const def of defs) {
+        if (def.isRoot) {
+            // Place first triangle at origin (0, 0)
+            const sa = def.sideA || 10;
+            const sb = def.sideB || 10;
+            const sc = def.sideC || 10;
+
+            const p1: Point = { id: `p_${def.id}_1`, x: 0, y: 0, label: 'Start' };
+            // Place p2 along the X axis
+            const p2: Point = { id: `p_${def.id}_2`, x: sa, y: 0, label: '' };
+            
+            // CONFIGURATION: A=Bottom, B=Left, C=Right
+            // Note: In SVG, Y increases downwards. Default calculateThirdPoint (flip=false) results in Positive Y (Down).
+            // User requests "Upward Convex" (vertex at top), which requires Negative Y.
+            // We pass !def.flip so that default (false) becomes true -> sign -1 -> Negative Y (Up).
+            const p3 = calculateThirdPoint(p1, p2, sb, sc, !def.flip);
+
+            if (p3) {
+                p3.id = `p_${def.id}_3`;
+                const area = calculateHeronArea(sa, sb, sc);
+                const t: RenderedTriangle = {
+                    id: def.id,
+                    name: def.name,
+                    p1, p2, p3,
+                    color: def.color,
+                    area,
+                    paramId: def.id,
+                    edgeLabels: ['A', 'C', 'B'] 
+                };
+                triangles.push(t);
+                triangleMap.set(def.id, t);
+                points.push(p1, p2, p3);
+            }
+        } else {
+            // Attached triangle
+            const parent = triangleMap.get(def.attachedToTriangleId || '');
+            if (parent && def.sideLeft && def.sideRight && def.attachedEdgeIndex !== undefined) {
+                const t = calculateAttachedTriangle(parent, def as any);
+                if (t) {
+                    triangles.push(t);
+                    triangleMap.set(def.id, t);
+                    points.push(t.p3);
+                }
+            }
+        }
+    }
+
+    return { points, triangles };
+};
+
+export const getCentroid = (t: RenderedTriangle): Point => {
+    return {
+        id: 'centroid',
+        x: (t.p1.x + t.p2.x + t.p3.x) / 3,
+        y: (t.p1.y + t.p2.y + t.p3.y) / 3
+    };
+};
+
+// Validate triangle inequality for root triangle
+export const isValidRootTriangle = (sideA: number, sideB: number, sideC: number): boolean => {
+    if (sideA <= 0 || sideB <= 0 || sideC <= 0) return false;
+    return (sideA + sideB > sideC) && (sideB + sideC > sideA) && (sideC + sideA > sideB);
+};
+
+// Validate triangle inequality for attached triangle
+export const isValidAttachedTriangle = (refEdge: number, sideLeft: number, sideRight: number): boolean => {
+    if (refEdge <= 0 || sideLeft <= 0 || sideRight <= 0) return false;
+    return (refEdge < sideLeft + sideRight) && (sideLeft < refEdge + sideRight) && (sideRight < refEdge + sideLeft);
+};
+
+
+// ============================================================
+// FILE: ./utils/dxfExport.ts
+// ============================================================
+
+import { RenderedTriangle, Point } from '../types';
+
+// DXF color constants
+const COLOR_BLUE = 5;      // Blue for triangle numbers
+const COLOR_GRAY = 8;      // Gray for edges and dimensions
+
+// Helper to flip Y coordinate (screen Y is inverted from CAD Y)
+const flipY = (y: number): number => -y;
+
+// Calculate distance between two points
+const distance = (p1: Point, p2: Point): number => {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+};
+
+// Generate DXF file content from triangles
+export const generateDXF = (triangles: RenderedTriangle[]): string => {
+  const lines: string[] = [];
+
+  // DXF Header
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('HEADER');
+  lines.push('9');
+  lines.push('$ACADVER');
+  lines.push('1');
+  lines.push('AC1009'); // AutoCAD R12 format for compatibility
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // Tables section (minimal)
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('TABLES');
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // Entities section
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('ENTITIES');
+
+  // Add each triangle
+  triangles.forEach((t) => {
+    const p1 = { x: t.p1.x, y: flipY(t.p1.y) };
+    const p2 = { x: t.p2.x, y: flipY(t.p2.y) };
+    const p3 = { x: t.p3.x, y: flipY(t.p3.y) };
+
+    // Triangle edges (gray)
+    lines.push(...createLine(p1.x, p1.y, p2.x, p2.y, COLOR_GRAY));
+    lines.push(...createLine(p2.x, p2.y, p3.x, p3.y, COLOR_GRAY));
+    lines.push(...createLine(p3.x, p3.y, p1.x, p1.y, COLOR_GRAY));
+
+    // Dimension labels at edge midpoints
+    const edges = [
+      { start: p1, end: p2, label: t.edgeLabels?.[0] },
+      { start: p2, end: p3, label: t.edgeLabels?.[1] },
+      { start: p3, end: p1, label: t.edgeLabels?.[2] },
+    ];
+
+    // Calculate centroid for determining "outside" direction
+    const cx = (p1.x + p2.x + p3.x) / 3;
+    const cy = (p1.y + p2.y + p3.y) / 3;
+    const textHeight = 0.3;
+    const offsetDist = textHeight * 0.5;
+
+    edges.forEach((edge) => {
+      // Skip Ref edges (shared with parent)
+      if (edge.label === 'Ref') return;
+
+      const midX = (edge.start.x + edge.end.x) / 2;
+      const midY = (edge.start.y + edge.end.y) / 2;
+      const len = distance(edge.start as Point, edge.end as Point);
+      const dimText = len.toFixed(2);
+
+      // Calculate edge direction and perpendicular
+      const dx = edge.end.x - edge.start.x;
+      const dy = edge.end.y - edge.start.y;
+      const edgeLen = Math.sqrt(dx * dx + dy * dy);
+
+      // Perpendicular vector (normalized)
+      const perpX = -dy / edgeLen;
+      const perpY = dx / edgeLen;
+
+      // Determine which side is "outside" (away from centroid)
+      const toMidX = midX - cx;
+      const toMidY = midY - cy;
+      const dot = toMidX * perpX + toMidY * perpY;
+      const sign = dot >= 0 ? 1 : -1;
+
+      // Offset position
+      const labelX = midX + sign * perpX * offsetDist;
+      const labelY = midY + sign * perpY * offsetDist;
+
+      // Calculate angle for text rotation
+      let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+      // Keep text readable (not upside down)
+      if (angle > 90 || angle < -90) {
+        angle += 180;
+      }
+
+      lines.push(...createText(labelX, labelY, dimText, textHeight, COLOR_GRAY, angle));
+    });
+
+    // Triangle number in circle at centroid (blue)
+    const number = t.name.replace(/\D/g, '');
+
+    // Circle around number
+    lines.push(...createCircle(cx, cy, 0.5, COLOR_BLUE));
+    // Number text
+    lines.push(...createText(cx, cy, number, 0.4, COLOR_BLUE, 0));
+  });
+
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // EOF
+  lines.push('0');
+  lines.push('EOF');
+
+  return lines.join('\n');
+};
+
+// Create a LINE entity
+const createLine = (x1: number, y1: number, x2: number, y2: number, color: number): string[] => {
+  return [
+    '0',
+    'LINE',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x1.toFixed(4),
+    '20',
+    y1.toFixed(4),
+    '30',
+    '0', // Z1
+    '11',
+    x2.toFixed(4),
+    '21',
+    y2.toFixed(4),
+    '31',
+    '0', // Z2
+  ];
+};
+
+// Create a CIRCLE entity
+const createCircle = (x: number, y: number, radius: number, color: number): string[] => {
+  return [
+    '0',
+    'CIRCLE',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x.toFixed(4),
+    '20',
+    y.toFixed(4),
+    '30',
+    '0', // Z
+    '40',
+    radius.toFixed(4), // Radius
+  ];
+};
+
+// Create a TEXT entity with rotation
+const createText = (x: number, y: number, text: string, height: number, color: number, rotation: number = 0): string[] => {
+  return [
+    '0',
+    'TEXT',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x.toFixed(4),
+    '20',
+    y.toFixed(4),
+    '30',
+    '0', // Z
+    '40',
+    height.toFixed(4), // Text height
+    '1',
+    text, // Text content
+    '50',
+    rotation.toFixed(2), // Rotation angle
+    '72',
+    '1', // Horizontal justification: center
+    '73',
+    '2', // Vertical justification: middle
+    '11',
+    x.toFixed(4), // Alignment point X
+    '21',
+    y.toFixed(4), // Alignment point Y
+    '31',
+    '0',
+  ];
+};
+
+// Download DXF file
+export const downloadDXF = (triangles: RenderedTriangle[], filename: string = 'triangles.dxf'): void => {
+  const dxfContent = generateDXF(triangles);
+  const blob = new Blob([dxfContent], { type: 'application/dxf' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+
+// ============================================================
+// FILE: ./services/geminiService.ts
+// ============================================================
+
+
+import { GoogleGenAI } from "@google/genai";
+import { Point, RenderedTriangle } from "../types";
+import { distance } from "../utils/geometryUtils";
+
+let aiClient: GoogleGenAI | null = null;
+
+const getClient = () => {
+  if (!aiClient && process.env.API_KEY) {
+    aiClient = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  }
+  return aiClient;
+};
+
+export const analyzeGeometry = async (
+  points: Point[],
+  triangles: RenderedTriangle[],
+  userQuery?: string
+): Promise<string> => {
+  const client = getClient();
+  if (!client) {
+    return "API Key is missing. Please ensure the application is configured correctly.";
+  }
+
+  // Construct context specific to Area Unfolding / Triangulation (San-sha-ho)
+  let context = "I have a set of triangles connected via the 'Area Unfolding' (Triangulation) method.\n\n";
+  
+  context += "Geometry Data:\n";
+  triangles.forEach(t => {
+    // Round coords for brevity
+    const p1 = `(${t.p1.x.toFixed(1)}, ${t.p1.y.toFixed(1)})`;
+    const p2 = `(${t.p2.x.toFixed(1)}, ${t.p2.y.toFixed(1)})`;
+    const p3 = `(${t.p3.x.toFixed(1)}, ${t.p3.y.toFixed(1)})`;
+    
+    // Calculate side lengths
+    const s1 = distance(t.p1, t.p2).toFixed(2);
+    const s2 = distance(t.p2, t.p3).toFixed(2);
+    const s3 = distance(t.p3, t.p1).toFixed(2);
+
+    context += `- Triangle "${t.name}" (Area: ${t.area.toFixed(2)}). Vertices: [${p1}, ${p2}, ${p3}]. Sides: ${s1}, ${s2}, ${s3}.\n`;
+  });
+  
+  const totalArea = triangles.reduce((sum, t) => sum + t.area, 0).toFixed(2);
+  context += `\nTotal Calculated Area: ${totalArea}\n`;
+
+  const prompt = userQuery 
+    ? `User Question: "${userQuery}"\n\nAnswer based on the geometric data.` 
+    : `Analyze this shape. Does it resemble a common land plot shape (e.g., L-shape, Rectangle)? Is the triangulation logic sound? Explain the total area.`;
+
+  try {
+    const response = await client.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [
+        {
+          text: context
+        },
+        {
+          text: prompt
+        }
+      ],
+      config: {
+        systemInstruction: "You are an expert Surveyor and Geometry assistant. You specialize in 'Triangulation Method' (San-sha-ho) for land area calculation. Provide precise, professional, yet easy-to-understand insights.",
+      }
+    });
+
+    return response.text || "No analysis generated.";
+  } catch (error) {
+    console.error("Gemini Error:", error);
+    return "Failed to generate analysis. Please try again.";
+  }
+};
+
+
+// ============================================================
+// FILE: ./components/Toolbar.tsx
+// ============================================================
+
+import React, { useState, useEffect } from 'react';
+import { TriangleDef } from '../types';
+
+interface InputPanelProps {
+  mode: 'ROOT' | 'ATTACH' | 'EDIT_ROOT' | 'EDIT_ATTACHED';
+  initialValues?: { s1?: number | string, s2?: number | string, s3?: number | string };
+  parentTriangleName?: string;
+  onSubmit: (values: any) => void;
+  onCancel?: () => void;
+  onValuesChange?: (values: any) => void;
+}
+
+const InputPanel: React.FC<InputPanelProps> = ({ 
+  mode, 
+  parentTriangleName, 
+  initialValues, 
+  onSubmit, 
+  onCancel,
+  onValuesChange 
+}) => {
+  const [values, setValues] = useState({ s1: '', s2: '', s3: '' });
+
+  // Reset or set values when mode or initialValues change
+  useEffect(() => {
+    if (initialValues) {
+        const newValues = {
+            s1: initialValues.s1?.toString() || '',
+            s2: initialValues.s2?.toString() || '',
+            s3: initialValues.s3?.toString() || ''
+        };
+        setValues(newValues);
+        // Sync parent state immediately when loading existing values
+        if(onValuesChange) onValuesChange(newValues);
+    } else {
+        const defaults = { s1: '', s2: '', s3: '' };
+        setValues(defaults);
+        if(onValuesChange) onValuesChange(defaults);
+    }
+  }, [mode, parentTriangleName, initialValues]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleChange = (field: string, val: string) => {
+    const newValues = { ...values, [field]: val };
+    setValues(newValues);
+    if (onValuesChange) {
+        onValuesChange(newValues);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSubmit(values);
+  };
+
+  const isRootMode = mode === 'ROOT' || mode === 'EDIT_ROOT';
+  const isEdit = mode.startsWith('EDIT');
+
+  const getTitle = () => {
+      if (mode === 'ROOT') return 'Create Base Triangle (SSS)';
+      if (mode === 'EDIT_ROOT') return 'Edit Base Triangle';
+      if (mode === 'EDIT_ATTACHED') return 'Edit Attached Triangle';
+      return <><span className="text-slate-500">Attach to</span> <span className="text-blue-600 bg-blue-50 px-1 rounded">{parentTriangleName}</span></>;
+  };
+
+  return (
+    <div className="bg-white p-4 border-b border-slate-200 shadow-sm z-10 transition-all">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
+        {getTitle()}
+      </h3>
+      
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <div className="flex gap-2 w-full">
+            {isRootMode ? (
+                <>
+                    <div className="flex-1 min-w-0">
+                        <label className="text-[10px] text-slate-400 block mb-1 truncate">Side A (Base)</label>
+                        <input autoFocus type="number" step="any" placeholder="Len" className="input-field" value={values.s1} onChange={e => handleChange('s1', e.target.value)} required />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <label className="text-[10px] text-slate-400 block mb-1 truncate">Side B (Left)</label>
+                        <input type="number" step="any" placeholder="Len" className="input-field" value={values.s2} onChange={e => handleChange('s2', e.target.value)} required />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <label className="text-[10px] text-slate-400 block mb-1 truncate">Side C (Right)</label>
+                        <input type="number" step="any" placeholder="Len" className="input-field" value={values.s3} onChange={e => handleChange('s3', e.target.value)} required />
+                    </div>
+                </>
+            ) : (
+                <>
+                    <div className="flex-1 min-w-0">
+                        <label className="text-[10px] text-slate-400 block mb-1 truncate">Left Side</label>
+                        <input autoFocus type="number" step="any" placeholder="Len" className="input-field" value={values.s1} onChange={e => handleChange('s1', e.target.value)} required />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <label className="text-[10px] text-slate-400 block mb-1 truncate">Right Side</label>
+                        <input type="number" step="any" placeholder="Len" className="input-field" value={values.s2} onChange={e => handleChange('s2', e.target.value)} required />
+                    </div>
+                </>
+            )}
+        </div>
+        
+        <div className="flex gap-2 mt-1">
+            <button type="submit" className={`flex-1 text-white text-sm py-2 rounded-md font-medium transition-colors whitespace-nowrap ${isEdit ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                {isEdit ? 'Update Triangle' : (mode === 'ROOT' ? 'Create Base' : 'Add Triangle')}
+            </button>
+            {onCancel && (
+                <button type="button" onClick={onCancel} className="px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-md text-sm whitespace-nowrap">
+                    Cancel
+                </button>
+            )}
+        </div>
+      </form>
+      <style>{`
+        .input-field {
+            @apply px-2 py-2 border border-slate-300 rounded text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 w-full min-w-0;
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default InputPanel;
+
+// ============================================================
+// FILE: ./components/TriangleListItem.tsx
+// ============================================================
+
+
+import React from 'react';
+import { TriangleDef } from '../types';
+import { Edit2, ArrowRight } from 'lucide-react';
+
+interface TriangleListItemProps {
+  def: TriangleDef;
+  isSelected: boolean;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onEdit: (id: string) => void;
+}
+
+const TriangleListItem: React.FC<TriangleListItemProps> = ({ 
+  def, 
+  isSelected, 
+  onSelect,
+  onDelete,
+  onEdit
+}) => {
+  return (
+    <div 
+      className={`p-3 border rounded-lg mb-2 transition-all cursor-pointer relative group ${
+        isSelected 
+          ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' 
+          : 'border-slate-200 hover:border-blue-300 hover:bg-white'
+      }`}
+      onClick={() => onSelect(def.id)}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2 overflow-hidden">
+            <div 
+              className="w-3 h-3 rounded-full flex-shrink-0" 
+              style={{ backgroundColor: def.color }}
+            ></div>
+            <span className="font-bold text-slate-700 truncate">{def.name}</span>
+            {def.isRoot && <span className="text-[10px] bg-slate-200 px-1.5 rounded text-slate-600 flex-shrink-0">ROOT</span>}
+        </div>
+        
+        <div className="flex items-center gap-1">
+             <button 
+              onClick={(e) => { e.stopPropagation(); onEdit(def.id); }}
+              className="text-slate-400 hover:text-amber-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+              title="Edit"
+            >
+              <Edit2 size={14} />
+            </button>
+            <button 
+              onClick={(e) => { e.stopPropagation(); onDelete(def.id); }}
+              className="text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+              title="Delete"
+            >
+              ×
+            </button>
+        </div>
+      </div>
+
+      <div className="text-xs text-slate-500 font-mono">
+        {def.isRoot ? (
+          <div className="flex gap-1 w-full">
+            <div className="bg-slate-100 px-1 py-1 rounded text-center flex-1 min-w-0 truncate" title={`Side A: ${def.sideA}`}>A:{def.sideA}</div>
+            <div className="bg-slate-100 px-1 py-1 rounded text-center flex-1 min-w-0 truncate" title={`Side B: ${def.sideB}`}>B:{def.sideB}</div>
+            <div className="bg-slate-100 px-1 py-1 rounded text-center flex-1 min-w-0 truncate" title={`Side C: ${def.sideC}`}>C:{def.sideC}</div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 w-full">
+            <span className="bg-slate-100 px-2 py-1 rounded flex-1 text-center min-w-0 truncate" title={`Left: ${def.sideLeft}`}>L:{def.sideLeft}</span>
+            <span className="bg-slate-100 px-2 py-1 rounded flex-1 text-center min-w-0 truncate" title={`Right: ${def.sideRight}`}>R:{def.sideRight}</span>
+            <ArrowRight size={12} className="text-slate-400 flex-shrink-0"/>
+            <span className="truncate flex-1 text-right text-[10px]">Ref:{def.attachedToTriangleId?.substring(0,4)}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default TriangleListItem;
+
+
+// ============================================================
+// FILE: ./components/GeometryCanvas.tsx
+// ============================================================
+
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
+import Konva from 'konva';
+import { RenderedTriangle, ToolMode, Point } from '../types';
+import { getCentroid, distance, generateId } from '../utils/geometryUtils';
+import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+
+interface GeometryCanvasProps {
+  triangles: RenderedTriangle[];
+  phantomTriangle?: RenderedTriangle | null;
+  mode: ToolMode;
+  selectedTriangleId: string | null;
+  onSelectTriangle: (id: string) => void;
+  onEdgeSelect: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
+  onEdgeDoubleClick: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
+  onDimensionChange?: (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number) => boolean;
+  onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onPhantomClick?: () => void;
+  onBackgroundClick?: () => void;
+  selectedEdge: { triangleId: string, edgeIndex: 0 | 1 | 2 } | null;
+  occupiedEdges?: Set<string>;
+}
+
+type InteractionState =
+  | { type: 'IDLE' }
+  | { type: 'PAN_READY'; startX: number; startY: number }
+  | { type: 'PANNING'; lastX: number; lastY: number }
+  | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
+  | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point };
+
+const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
+  triangles,
+  phantomTriangle,
+  mode,
+  selectedTriangleId,
+  onSelectTriangle,
+  onEdgeSelect,
+  onEdgeDoubleClick,
+  onDimensionChange,
+  onAddAttachedTriangle,
+  onVertexReshape,
+  onPhantomClick,
+  onBackgroundClick,
+  selectedEdge,
+  occupiedEdges
+}) => {
+  const stageRef = useRef<Konva.Stage>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Viewport state - using scale and position for Konva
+  const [stageScale, setStageScale] = useState(1);
+  const [stagePosition, setStagePosition] = useState({ x: 200, y: 150 }); // Initial offset to center view
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [interaction, setInteraction] = useState<InteractionState>({ type: 'IDLE' });
+  const [editingDim, setEditingDim] = useState<{ tId: string, index: 0 | 1 | 2, value: string, originalValue: number, label: string } | null>(null);
+  const [editingInputPos, setEditingInputPos] = useState<{ x: number; y: number; angle: number; fontSize: number } | null>(null);
+
+  // Initial viewport: -10, -10 to 40, 30 (width: 50, height: 40)
+  // CAD-like coordinate system: origin at bottom-left, positive X right, positive Y up
+  // But screen Y is inverted, so we use negative Y values for "up"
+  const worldBounds = { x: 0, y: -40, w: 50, h: 40 };
+
+  // Determine which side of the edge (p1->p2) the mouse point is on
+  // Returns true if the point is on the "flip" side (negative cross product)
+  const isFlipSide = useCallback((p1: Point, p2: Point, mouse: Point): boolean => {
+    // Cross product of (p2-p1) and (mouse-p1)
+    const cross = (p2.x - p1.x) * (mouse.y - p1.y) - (p2.y - p1.y) * (mouse.x - p1.x);
+    return cross < 0;
+  }, []);
+
+  // Convert world coordinates to stage coordinates
+  const worldToStage = useCallback((worldX: number, worldY: number): { x: number; y: number } => {
+    const normalizedX = (worldX - worldBounds.x) / worldBounds.w;
+    const normalizedY = (worldY - worldBounds.y) / worldBounds.h;
+    return {
+      x: normalizedX * 1000, // Use a fixed virtual canvas size
+      y: normalizedY * 800
+    };
+  }, []);
+
+  // Convert stage coordinates to world coordinates
+  const stageToWorld = useCallback((stageX: number, stageY: number): { x: number; y: number } => {
+    const normalizedX = stageX / 1000;
+    const normalizedY = stageY / 800;
+    return {
+      x: worldBounds.x + normalizedX * worldBounds.w,
+      y: worldBounds.y + normalizedY * worldBounds.h
+    };
+  }, []);
+
+  // Get world point from stage event
+  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent>): Point => {
+    if (!stageRef.current) return { id: generateId(), x: 0, y: 0 };
+    const stage = stageRef.current;
+    const pointerPos = stage.getPointerPosition();
+    if (!pointerPos) return { id: generateId(), x: 0, y: 0 };
+    
+    // Get position relative to stage
+    const stageX = (pointerPos.x - stage.x()) / stage.scaleX();
+    const stageY = (pointerPos.y - stage.y()) / stage.scaleY();
+    
+    const world = stageToWorld(stageX, stageY);
+    return { id: generateId(), x: world.x, y: world.y };
+  }, [stageToWorld]);
+
+  // Initialize stage size
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        setStageSize({ width: rect.width, height: rect.height });
+        
+        // Calculate initial scale to fit world bounds
+        const scaleX = rect.width / 1000;
+        const scaleY = rect.height / 800;
+        const initialScale = Math.min(scaleX, scaleY) * 0.9;
+        setStageScale(initialScale);
+        
+        // Center the view
+        const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+        const centerY = rect.height / 2 - (800 * initialScale) / 2;
+        setStagePosition({ x: centerX, y: centerY });
+      }
+    };
+    
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, []);
+
+  const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (e.evt.button === 0 && !editingDim) {
+      // If in phantom placing mode, confirm the triangle on click
+      if (interaction.type === 'PHANTOM_PLACING') {
+        if (onAddAttachedTriangle) {
+          const { p1, p2, currentMouse, tId, index } = interaction;
+          // Check if this edge is already occupied
+          const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+          if (isOccupied) {
+            // Edge already has a child triangle - don't add another
+            setInteraction({ type: 'IDLE' });
+            return;
+          }
+          const sideLeft = distance(p1, currentMouse);
+          const sideRight = distance(p2, currentMouse);
+          const flip = isFlipSide(p1, p2, currentMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If in vertex reshaping mode, confirm the reshape on click
+      if (interaction.type === 'VERTEX_RESHAPING') {
+        if (onVertexReshape) {
+          const { p1, p2, currentMouse, tId } = interaction;
+          const sideLeft = distance(p1, currentMouse);
+          const sideRight = distance(p2, currentMouse);
+          const flip = isFlipSide(p1, p2, currentMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onVertexReshape(tId, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      setInteraction({ type: 'PAN_READY', startX: e.evt.clientX, startY: e.evt.clientY });
+    }
+  };
+
+  const handleEdgeMouseDown = (e: Konva.KonvaEventObject<MouseEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
+    e.evt.stopPropagation();
+    if (e.evt.button === 0 && !editingDim) {
+      setInteraction({
+        type: 'EDGE_READY',
+        tId,
+        index,
+        p1,
+        p2,
+        startX: e.evt.clientX,
+        startY: e.evt.clientY
+      });
+    }
+  };
+
+  const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (interaction.type === 'PAN_READY') {
+      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
+      if (dist > 3) {
+        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+      }
+    } else if (interaction.type === 'PANNING') {
+      const dx = e.evt.clientX - interaction.lastX;
+      const dy = e.evt.clientY - interaction.lastY;
+      setStagePosition(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+    } else if (interaction.type === 'EDGE_READY') {
+      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
+      if (dist > 5) {
+        // Check if this edge is already occupied before allowing drag
+        const isOccupied = occupiedEdges?.has(`${interaction.tId}-${interaction.index}`) || false;
+        if (isOccupied) {
+          // Edge is occupied, cancel drag and switch to panning
+          setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+          return;
+        }
+        const currentMouse = getWorldPoint(e);
+        setInteraction({
+          type: 'EDGE_DRAGGING',
+          tId: interaction.tId,
+          index: interaction.index,
+          p1: interaction.p1,
+          p2: interaction.p2,
+          currentMouse
+        });
+      }
+    } else if (interaction.type === 'EDGE_DRAGGING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'PHANTOM_PLACING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'VERTEX_RESHAPING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (interaction.type === 'EDGE_READY') {
+      // Single click on edge - do nothing (use double click for phantom mode)
+    } else if (interaction.type === 'EDGE_DRAGGING') {
+      if (onAddAttachedTriangle) {
+        const { p1, p2, currentMouse, tId, index } = interaction;
+        // Check if this edge is already occupied
+        const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+        if (isOccupied) {
+          // Edge already has a child triangle - don't add another
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+        const sideLeft = distance(p1, currentMouse);
+        const sideRight = distance(p2, currentMouse);
+        const flip = isFlipSide(p1, p2, currentMouse);
+        // Only add if both sides are valid (greater than 0)
+        if (sideLeft > 0 && sideRight > 0) {
+          onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+        }
+      }
+    } else if (interaction.type === 'PAN_READY') {
+      if (onBackgroundClick) {
+        onBackgroundClick();
+      }
+    }
+    setInteraction({ type: 'IDLE' });
+  };
+
+  const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
+    e.evt.preventDefault();
+    e.evt.stopPropagation();
+
+    if (!stageRef.current) return;
+
+    const stage = stageRef.current;
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    const zoomSensitivity = 0.002;
+    const delta = e.evt.deltaY;
+    const scaleBy = 1 - delta * zoomSensitivity;
+    const newScale = Math.max(0.1, Math.min(5, oldScale * scaleBy));
+
+    // Limit zoom (already applied above)
+
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+
+    setStageScale(newScale);
+    setStagePosition(newPos);
+  };
+
+  const handleZoomBtn = (direction: 'in' | 'out') => {
+    if (!stageRef.current) return;
+    
+    const stage = stageRef.current;
+    const oldScale = stage.scaleX();
+    const center = {
+      x: stageSize.width / 2,
+      y: stageSize.height / 2,
+    };
+
+    const mousePointTo = {
+      x: (center.x - stage.x()) / oldScale,
+      y: (center.y - stage.y()) / oldScale,
+    };
+
+    const scaleBy = direction === 'in' ? 1.25 : 0.8;
+    const newScale = oldScale * scaleBy;
+
+    if (newScale < 0.1 || newScale > 5) return;
+
+    const newPos = {
+      x: center.x - mousePointTo.x * newScale,
+      y: center.y - mousePointTo.y * newScale,
+    };
+
+    setStageScale(newScale);
+    setStagePosition(newPos);
+  };
+
+  const handleFitView = () => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const scaleX = rect.width / 1000;
+    const scaleY = rect.height / 800;
+    const initialScale = Math.min(scaleX, scaleY) * 0.9;
+    setStageScale(initialScale);
+    
+    const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+    const centerY = rect.height / 2 - (800 * initialScale) / 2;
+    setStagePosition({ x: centerX, y: centerY });
+  };
+
+  const handleLabelClick = (tId: string, index: 0 | 1 | 2, currentLen: number, label: string, labelX: number, labelY: number, angle: number, fontSize: number) => {
+    if (label === 'Ref') return;
+    setEditingDim({ tId, index, value: currentLen.toFixed(2), originalValue: currentLen, label: label || '' });
+    
+    // Convert Konva stage coordinates to HTML screen coordinates
+    if (stageRef.current && containerRef.current) {
+      const stage = stageRef.current;
+      const containerRect = containerRef.current.getBoundingClientRect();
+      
+      // Get the actual screen position of the label
+      const stageX = (labelX * stage.scaleX()) + stage.x();
+      const stageY = (labelY * stage.scaleY()) + stage.y();
+      
+      setEditingInputPos({
+        x: containerRect.left + stageX,
+        y: containerRect.top + stageY,
+        angle,
+        fontSize: fontSize * stage.scaleX() // Scale font size to match zoom
+      });
+    }
+  };
+
+  const commitEdit = () => {
+    if (!editingDim || !onDimensionChange) {
+      setEditingDim(null);
+      setEditingInputPos(null);
+      return;
+    }
+    const val = parseFloat(editingDim.value);
+    if (!isNaN(val) && val > 0) {
+      const success = onDimensionChange(editingDim.tId, editingDim.index, val);
+      if (success) {
+        setEditingDim(null);
+        setEditingInputPos(null);
+      } else {
+        setEditingDim(null);
+        setEditingInputPos(null);
+      }
+    } else {
+      setEditingDim(null);
+      setEditingInputPos(null);
+    }
+  };
+
+  // Render Grid
+  const renderGrid = () => {
+    const step = 1;
+    const startX = Math.floor(worldBounds.x / step) * step;
+    const startY = Math.floor(worldBounds.y / step) * step;
+    const endX = worldBounds.x + worldBounds.w;
+    const endY = worldBounds.y + worldBounds.h;
+
+    const lines = [];
+    for (let x = startX; x <= endX; x += step) {
+      const sp1 = worldToStage(x, worldBounds.y);
+      const sp2 = worldToStage(x, endY);
+      const isMajor = Math.abs(x % (step * 5)) < 0.001 || Math.abs(x) < 0.001;
+      lines.push(
+        <Line
+          key={`v${x}`}
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={x === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
+          strokeWidth={x === 0 ? 2 : 1}
+        />
+      );
+    }
+    for (let y = startY; y <= endY; y += step) {
+      const sp1 = worldToStage(worldBounds.x, y);
+      const sp2 = worldToStage(endX, y);
+      const isMajor = Math.abs(y % (step * 5)) < 0.001 || Math.abs(y) < 0.001;
+      lines.push(
+        <Line
+          key={`h${y}`}
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={y === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
+          strokeWidth={y === 0 ? 2 : 1}
+        />
+      );
+    }
+    return lines;
+  };
+
+  // Render Edge with label
+  const renderEdge = (
+    t: RenderedTriangle,
+    pStart: Point,
+    pEnd: Point,
+    index: 0 | 1 | 2,
+    isPhantom: boolean = false
+  ) => {
+    const isSelectedEdge = selectedEdge?.triangleId === t.id && selectedEdge?.edgeIndex === index;
+    const isSelectedTriangle = selectedTriangleId === t.id;
+    const isOccupied = occupiedEdges?.has(`${t.id}-${index}`) || false;
+    const rawLen = distance(pStart, pEnd);
+    const len = rawLen.toFixed(2);
+
+    const sp1 = worldToStage(pStart.x, pStart.y);
+    const sp2 = worldToStage(pEnd.x, pEnd.y);
+
+    const midX = (pStart.x + pEnd.x) / 2;
+    const midY = (pStart.y + pEnd.y) / 2;
+
+    const labelPos = worldToStage(midX, midY);
+    const edgeLabel = t.edgeLabels ? t.edgeLabels[index] : '';
+    const isEditing = editingDim?.tId === t.id && editingDim?.index === index;
+
+    // Calculate angle for label rotation
+    const dx = pEnd.x - pStart.x;
+    const dy = pEnd.y - pStart.y;
+    let angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    if (angle > 90 || angle < -90) {
+      angle += 180;
+    }
+
+    // Calculate font size based on world-to-screen scale
+    // Similar to original SVG: uiScale = viewBox.w / 50
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+
+    // Calculate text for label
+    // Normal: just the value (e.g. "5.00")
+    // Editing: with label prefix (e.g. "B: 5.00")
+    const labelText = len;
+    const editingText = edgeLabel && edgeLabel !== 'Ref' ? `${edgeLabel}: ${editingDim?.value}` : editingDim?.value || '';
+
+    // Estimate text width (monospace: ~0.6 * fontSize per character)
+    const charWidth = fontSize * 0.6;
+    const labelWidth = labelText.length * charWidth;
+    const editingWidth = editingText.length * charWidth;
+
+    return (
+      <Group key={`edge-${t.id}-${index}`}>
+        {/* Hit Area & Drag Trigger - skip for Ref edges to not block parent's label */}
+        {edgeLabel !== 'Ref' && (
+          <Line
+            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+            stroke="transparent"
+            strokeWidth={20}
+            onMouseDown={(e) => !isPhantom && !isOccupied && handleEdgeMouseDown(e, t.id, index, pStart, pEnd)}
+            onDblClick={(e) => {
+              if (!isPhantom && !isOccupied) {
+                e.evt.stopPropagation();
+                // Enter phantom placing mode
+                const currentMouse = getWorldPoint(e);
+                setInteraction({
+                  type: 'PHANTOM_PLACING',
+                  tId: t.id,
+                  index,
+                  p1: pStart,
+                  p2: pEnd,
+                  currentMouse
+                });
+              }
+            }}
+          />
+        )}
+        {/* Visible Edge */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={isSelectedEdge ? "#ef4444" : (isPhantom ? "#94a3b8" : "rgba(0,0,0,0.2)")}
+          strokeWidth={isSelectedEdge ? 2 : 1}
+          dash={isSelectedEdge ? undefined : (isPhantom ? [4, 4] : [8, 8])}
+        />
+        {/* Label - skip rendering for Ref edges (child's shared edge) to avoid duplicate */}
+        {edgeLabel !== 'Ref' && !isEditing ? (
+          <Group x={labelPos.x} y={labelPos.y} rotation={angle}>
+            <Text
+              x={0}
+              y={0}
+              text={labelText}
+              fontSize={fontSize}
+              fontFamily="monospace"
+              fontStyle="bold"
+              fill="#64748b"
+              fillAfterStrokeEnabled={true}
+              stroke="white"
+              strokeWidth={3}
+              offsetX={labelWidth / 2}
+              offsetY={fontSize / 2}
+              onClick={() => !isPhantom && handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
+            />
+          </Group>
+        ) : null}
+      </Group>
+    );
+  };
+
+  // Render Triangle Fill only (for bottom layer)
+  const renderTriangleFill = (t: RenderedTriangle, isPhantom: boolean = false) => {
+    const isSelected = selectedTriangleId === t.id;
+    const isEditingAnyEdge = editingDim?.tId === t.id;
+
+    const sp1 = worldToStage(t.p1.x, t.p1.y);
+    const sp2 = worldToStage(t.p2.x, t.p2.y);
+    const sp3 = worldToStage(t.p3.x, t.p3.y);
+
+    return (
+      <Shape
+        key={`fill-${t.id}`}
+        sceneFunc={(context, shape) => {
+          context.beginPath();
+          context.moveTo(sp1.x, sp1.y);
+          context.lineTo(sp2.x, sp2.y);
+          context.lineTo(sp3.x, sp3.y);
+          context.closePath();
+          context.fillStrokeShape(shape);
+        }}
+        fill={isPhantom ? "#cbd5e1" : "#94a3b8"}
+        opacity={isPhantom ? 0.3 : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
+        stroke={isPhantom ? "#94a3b8" : "#64748b"}
+        strokeWidth={isSelected ? 2 : 1}
+        dash={isPhantom ? [4, 4] : undefined}
+        onClick={() => {
+          if (isPhantom && onPhantomClick) {
+            onPhantomClick();
+          } else {
+            onSelectTriangle(t.id);
+          }
+        }}
+        onDblClick={(e) => {
+          if (!isPhantom) {
+            e.evt.stopPropagation();
+            // Enter vertex reshaping mode
+            setInteraction({
+              type: 'VERTEX_RESHAPING',
+              tId: t.id,
+              p1: t.p1,
+              p2: t.p2,
+              currentMouse: t.p3
+            });
+          }
+        }}
+      />
+    );
+  };
+
+  // Render Triangle Labels (edges and centroid label) - for top layer
+  const renderTriangleLabels = (t: RenderedTriangle, isPhantom: boolean = false) => {
+    const centroid = getCentroid(t);
+    const labelPos = worldToStage(centroid.x, centroid.y);
+
+    // Calculate font size based on world-to-screen scale
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(10, 1.2 * uiScale);
+
+    return (
+      <Group key={`labels-${t.id}`}>
+        {/* Edges */}
+        {renderEdge(t, t.p1, t.p2, 0, isPhantom)}
+        {renderEdge(t, t.p2, t.p3, 1, isPhantom)}
+        {renderEdge(t, t.p3, t.p1, 2, isPhantom)}
+        {/* Triangle Number in Circle */}
+        {isPhantom ? (
+          <Text
+            x={labelPos.x}
+            y={labelPos.y}
+            text="+"
+            fontSize={fontSize}
+            fontStyle="bold"
+            fill="#334155"
+            opacity={0.5}
+            offsetX={fontSize * 0.3}
+            offsetY={fontSize / 2}
+          />
+        ) : (
+          <Group x={labelPos.x} y={labelPos.y}>
+            <Circle
+              x={0}
+              y={0}
+              radius={fontSize * 0.7}
+              fill="white"
+              stroke="#3b82f6"
+              strokeWidth={2}
+              opacity={0.9}
+            />
+            <Text
+              x={0}
+              y={0}
+              text={t.name.replace(/\D/g, '')}
+              fontSize={fontSize * 0.8}
+              fontStyle="bold"
+              fill="#3b82f6"
+              offsetX={t.name.replace(/\D/g, '').length * fontSize * 0.24}
+              offsetY={fontSize * 0.4}
+            />
+          </Group>
+        )}
+      </Group>
+    );
+  };
+
+  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, and VERTEX_RESHAPING)
+  const renderDragGhost = () => {
+    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING') return null;
+    const { p1, p2, currentMouse } = interaction;
+
+    const sp1 = worldToStage(p1.x, p1.y);
+    const sp2 = worldToStage(p2.x, p2.y);
+    const sp3 = worldToStage(currentMouse.x, currentMouse.y);
+
+    const sL = distance(p1, currentMouse).toFixed(2);
+    const sR = distance(p2, currentMouse).toFixed(2);
+
+    // Calculate font size based on world-to-screen scale
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+
+    // Estimate text width (monospace: ~0.6 * fontSize per character)
+    const charWidth = fontSize * 0.6;
+    const textB = `B: ${sL}`;
+    const textC = `C: ${sR}`;
+    const widthB = textB.length * charWidth;
+    const widthC = textC.length * charWidth;
+
+    return (
+      <Group>
+        <Shape
+          sceneFunc={(context, shape) => {
+            context.beginPath();
+            context.moveTo(sp1.x, sp1.y);
+            context.lineTo(sp2.x, sp2.y);
+            context.lineTo(sp3.x, sp3.y);
+            context.closePath();
+            context.fillStrokeShape(shape);
+          }}
+          fill="#94a3b8"
+          opacity={0.2}
+          stroke="#94a3b8"
+          strokeWidth={1}
+          dash={[4, 4]}
+        />
+        <Line points={[sp1.x, sp1.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
+        <Line points={[sp2.x, sp2.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
+
+        <Text
+          x={(sp1.x + sp3.x) / 2}
+          y={(sp1.y + sp3.y) / 2}
+          text={textB}
+          fontSize={fontSize}
+          fill="#64748b"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={widthB / 2}
+          offsetY={fontSize / 2}
+        />
+        <Text
+          x={(sp2.x + sp3.x) / 2}
+          y={(sp2.y + sp3.y) / 2}
+          text={textC}
+          fontSize={fontSize}
+          fill="#64748b"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={widthC / 2}
+          offsetY={fontSize / 2}
+        />
+      </Group>
+    );
+  };
+
+  const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING' 
+    ? 'grabbing' 
+    : 'default';
+
+  return (
+    <div ref={containerRef} className="flex-1 h-full relative bg-slate-50 overflow-hidden select-none">
+      <Stage
+        ref={stageRef}
+        width={stageSize.width}
+        height={stageSize.height}
+        scaleX={stageScale}
+        scaleY={stageScale}
+        x={stagePosition.x}
+        y={stagePosition.y}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onWheel={handleWheel}
+        style={{ cursor: cursorStyle }}
+      >
+        <Layer>
+          {renderGrid()}
+          {/* Render all triangle fills first (bottom layer) */}
+          {triangles.map((t) => renderTriangleFill(t, false))}
+          {phantomTriangle && renderTriangleFill(phantomTriangle, true)}
+          {/* Render all labels on top (so they're clickable) */}
+          {triangles.map((t) => renderTriangleLabels(t, false))}
+          {phantomTriangle && renderTriangleLabels(phantomTriangle, true)}
+          {renderDragGhost()}
+        </Layer>
+      </Stage>
+
+      <div className="absolute bottom-6 right-6 flex flex-col gap-2">
+        <button
+          onClick={() => handleZoomBtn('in')}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+        >
+          <ZoomIn size={20} />
+        </button>
+        <button
+          onClick={() => handleZoomBtn('out')}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+        >
+          <ZoomOut size={20} />
+        </button>
+        <button
+          onClick={handleFitView}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+          title="Reset View"
+        >
+          <Maximize size={20} />
+        </button>
+      </div>
+
+      <div className="absolute bottom-4 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
+        <p className="font-semibold">Controls:</p>
+        <p>• Click Label: <span className="text-blue-600 font-bold">Edit Dimension</span></p>
+        <p>• Drag Edge: <span className="text-emerald-600 font-bold">Add New Triangle</span></p>
+        <p>• Scroll: Zoom / Drag BG: Pan</p>
+      </div>
+
+      {/* HTML Input overlay for editing dimensions */}
+      {editingDim && editingInputPos && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `${editingInputPos.x}px`,
+            top: `${editingInputPos.y}px`,
+            transform: `translate(-50%, -50%) rotate(${editingInputPos.angle}deg)`,
+            fontSize: `${editingInputPos.fontSize}px`,
+            fontFamily: 'ui-monospace, monospace',
+            fontWeight: '600',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.2em',
+            zIndex: 1000
+          }}
+        >
+          {editingDim.label && (
+            <span style={{ color: '#64748b' }}>
+              {editingDim.label}:
+            </span>
+          )}
+          <input
+            type="text"
+            inputMode="decimal"
+            value={editingDim.value}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
+                setEditingDim({...editingDim, value: value});
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditingDim(null);
+                setEditingInputPos(null);
+              }
+            }}
+            onBlur={commitEdit}
+            autoFocus
+            style={{
+              fontSize: 'inherit',
+              fontFamily: 'inherit',
+              fontWeight: 'inherit',
+              textAlign: 'center',
+              border: 'none',
+              outline: 'none',
+              background: 'rgba(255,255,255,0.9)',
+              color: '#64748b',
+              padding: '0 0.2em',
+              margin: '0',
+              cursor: 'text',
+              width: 'auto',
+              minWidth: '3em',
+              borderRadius: '2px'
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default GeometryCanvas;
+
+
+// ============================================================
+// FILE: ./App.tsx
+// ============================================================
+
+import React, { useState, useEffect, useMemo } from 'react';
+import { RenderedTriangle, TriangleDef, AIAnalysisResult, ToolMode } from './types';
+import { generateId, recalculateGeometry, calculateAttachedTriangle, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
+import { PALETTE } from './constants';
+import { analyzeGeometry } from './services/geminiService';
+import GeometryCanvas from './components/GeometryCanvas';
+import TriangleListItem from './components/TriangleListItem';
+import InputPanel from './components/Toolbar';
+import { BrainCircuit, Sparkles, Calculator, RefreshCw, Download } from 'lucide-react';
+import { downloadDXF } from './utils/dxfExport';
+
+const App: React.FC = () => {
+  // State: The Definition is the source of truth
+  // Initialize from localStorage if available to persist data across reloads
+  const [defs, setDefs] = useState<TriangleDef[]>(() => {
+    try {
+      const savedDefs = localStorage.getItem('geosolver_triangle_defs');
+      if (savedDefs) {
+        return JSON.parse(savedDefs);
+      }
+    } catch (e) {
+      console.error("Failed to load saved geometry:", e);
+    }
+    // Default State: Create a 5-5-5 triangle initially
+    return [{
+      id: generateId(),
+      name: 'T1',
+      color: PALETTE[0],
+      isRoot: true,
+      sideA: 5,
+      sideB: 5,
+      sideC: 5
+    }];
+  });
+  
+  // Derived State: Rendered geometry
+  const [geometry, setGeometry] = useState<{ points: any[], triangles: RenderedTriangle[] }>({ points: [], triangles: [] });
+  
+  // Selection & Input State
+  const [selectedTriangleId, setSelectedTriangleId] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<{ triangleId: string, edgeIndex: 0 | 1 | 2 } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  
+  // Keep track of current inputs to render phantom triangle in real-time
+  const [currentInputValues, setCurrentInputValues] = useState({ s1: '', s2: '', s3: '' });
+  
+  // AI State
+  const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisResult>({ text: "", loading: false });
+  const [userQuery, setUserQuery] = useState("");
+
+  // Persist to localStorage whenever defs change
+  useEffect(() => {
+    localStorage.setItem('geosolver_triangle_defs', JSON.stringify(defs));
+  }, [defs]);
+
+  // Re-calculate geometry whenever definitions change
+  useEffect(() => {
+    const calculated = recalculateGeometry(defs);
+    setGeometry(calculated);
+  }, [defs]);
+
+  // Handlers
+  const handleAddRootTriangle = (values: { s1: string, s2: string, s3: string }) => {
+    const sA = parseFloat(values.s1);
+    const sB = parseFloat(values.s2);
+    const sC = parseFloat(values.s3);
+
+    if (isNaN(sA) || isNaN(sB) || isNaN(sC)) return;
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: true,
+      sideA: sA,
+      sideB: sB,
+      sideC: sC
+    };
+
+    setDefs([...defs, newDef]);
+  };
+
+  const handleAddAttachedTriangle = (values: { s1: string, s2: string }) => {
+    if (!selectedEdge) return;
+
+    const sL = parseFloat(values.s1);
+    const sR = parseFloat(values.s2);
+
+    if (isNaN(sL) || isNaN(sR)) return;
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: false,
+      attachedToTriangleId: selectedEdge.triangleId,
+      attachedEdgeIndex: selectedEdge.edgeIndex,
+      sideLeft: sL,
+      sideRight: sR,
+      flip: false // Default direction
+    };
+
+    setDefs([...defs, newDef]);
+    setSelectedEdge(null); // Clear selection after add
+  };
+
+  const handleCanvasAddTriangle = (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => {
+    // Validate that both sides are positive and valid
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return; // Don't add invalid triangle
+    }
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: false,
+      attachedToTriangleId: triangleId,
+      attachedEdgeIndex: edgeIndex,
+      sideLeft: parseFloat(sideLeft.toFixed(2)),
+      sideRight: parseFloat(sideRight.toFixed(2)),
+      flip: flip
+    };
+    setDefs([...defs, newDef]);
+    setSelectedEdge(null); // Clear selection after adding
+  };
+
+  const handleVertexReshape = (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => {
+    // Validate that both sides are positive and valid
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return;
+    }
+
+    setDefs(defs.map(d => {
+      if (d.id !== triangleId) return d;
+
+      if (d.isRoot) {
+        // For root triangle, update sideB (left) and sideC (right), keep sideA (base)
+        return {
+          ...d,
+          sideB: parseFloat(sideLeft.toFixed(2)),
+          sideC: parseFloat(sideRight.toFixed(2)),
+          flip: flip
+        };
+      } else {
+        // For attached triangle, update sideLeft and sideRight
+        return {
+          ...d,
+          sideLeft: parseFloat(sideLeft.toFixed(2)),
+          sideRight: parseFloat(sideRight.toFixed(2)),
+          flip: flip
+        };
+      }
+    }));
+  };
+
+  const handleEdit = (id: string) => {
+    setEditingId(id);
+    setSelectedEdge(null);
+    setSelectedTriangleId(id);
+  };
+
+  const handleUpdateTriangle = (values: any) => {
+    if (!editingId) return;
+
+    setDefs(defs.map(d => {
+      if (d.id !== editingId) return d;
+      
+      if (d.isRoot) {
+        return {
+          ...d,
+          sideA: parseFloat(values.s1),
+          sideB: parseFloat(values.s2),
+          sideC: parseFloat(values.s3)
+        };
+      } else {
+        return {
+          ...d,
+          sideLeft: parseFloat(values.s1),
+          sideRight: parseFloat(values.s2)
+        };
+      }
+    }));
+    setEditingId(null);
+  };
+
+  // Direct dimension update from Canvas
+  const handleDimensionUpdate = (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number): boolean => {
+    if (isNaN(newValue) || newValue <= 0) {
+      alert('値は0より大きい数値である必要があります。');
+      return false;
+    }
+
+    const triangleDef = defs.find(d => d.id === triangleId);
+    if (!triangleDef) return false;
+
+    // Validate before updating
+    if (triangleDef.isRoot) {
+      // Root Mapping: 0=A, 1=C, 2=B (See utils/geometryUtils.ts)
+      let sideA = triangleDef.sideA || 0;
+      let sideB = triangleDef.sideB || 0;
+      let sideC = triangleDef.sideC || 0;
+      
+      if (edgeIndex === 0) sideA = newValue;
+      else if (edgeIndex === 1) sideC = newValue;
+      else if (edgeIndex === 2) sideB = newValue;
+
+      if (!isValidRootTriangle(sideA, sideB, sideC)) {
+        alert('三角形として成立しません。\n任意の2辺の和が残りの1辺より大きい必要があります。');
+        return false;
+      }
+    } else {
+      // Attached Mapping: 0=Ref, 1=R, 2=L
+      if (edgeIndex === 0) return false; // Ref is locked to parent
+      
+      // Get parent triangle to find reference edge length
+      const parentTriangle = geometry.triangles.find(t => t.id === triangleDef.attachedToTriangleId);
+      if (!parentTriangle) return false;
+
+      let refEdge = 0;
+      if (triangleDef.attachedEdgeIndex === 0) {
+        refEdge = distance(parentTriangle.p1, parentTriangle.p2);
+      } else if (triangleDef.attachedEdgeIndex === 1) {
+        refEdge = distance(parentTriangle.p2, parentTriangle.p3);
+      } else {
+        refEdge = distance(parentTriangle.p3, parentTriangle.p1);
+      }
+
+      let sideLeft = triangleDef.sideLeft || 0;
+      let sideRight = triangleDef.sideRight || 0;
+
+      if (edgeIndex === 1) sideRight = newValue;
+      else if (edgeIndex === 2) sideLeft = newValue;
+
+      if (!isValidAttachedTriangle(refEdge, sideLeft, sideRight)) {
+        alert('三角形として成立しません。\n参照辺の長さが他の2辺の和より小さい必要があります。');
+        return false;
+      }
+    }
+
+    // Update if validation passed
+    setDefs(prevDefs => prevDefs.map(d => {
+      if (d.id !== triangleId) return d;
+
+      if (d.isRoot) {
+        // Root Mapping: 0=A, 1=C, 2=B (See utils/geometryUtils.ts)
+        if (edgeIndex === 0) return { ...d, sideA: newValue };
+        if (edgeIndex === 1) return { ...d, sideC: newValue };
+        if (edgeIndex === 2) return { ...d, sideB: newValue };
+      } else {
+        // Attached Mapping: 0=Ref, 1=R, 2=L
+        if (edgeIndex === 0) return d; // Ref is locked to parent
+        if (edgeIndex === 1) return { ...d, sideRight: newValue };
+        if (edgeIndex === 2) return { ...d, sideLeft: newValue };
+      }
+      return d;
+    }));
+    return true;
+  };
+
+  const handleDelete = (id: string) => {
+    if(window.confirm("Delete this triangle? Attached triangles may disappear.")) {
+        setDefs(defs.filter(d => d.id !== id && d.attachedToTriangleId !== id));
+        if (selectedTriangleId === id) setSelectedTriangleId(null);
+        if (editingId === id) setEditingId(null);
+    }
+  };
+
+  const handleClear = () => {
+    if (window.confirm("Clear all geometry?")) {
+      setDefs([]);
+      setSelectedTriangleId(null);
+      setSelectedEdge(null);
+      setEditingId(null);
+      setAiAnalysis({ text: "", loading: false });
+    }
+  };
+
+  const handleReload = () => {
+    if (window.confirm("ページをリロードしますか？未保存の変更は失われます。")) {
+      window.location.reload();
+    }
+  };
+
+  const handleEdgeDoubleClick = (tId: string, edgeIndex: 0 | 1 | 2) => {
+      // Enter phantom mode for attaching a new triangle
+      if (!editingId) {
+        setSelectedEdge({ triangleId: tId, edgeIndex: edgeIndex });
+      }
+  };
+
+  const handleBackgroundClick = () => {
+      setSelectedEdge(null);
+      setSelectedTriangleId(null);
+      setEditingId(null);
+  };
+
+  const handleAskAI = async () => {
+    setAiAnalysis({ ...aiAnalysis, loading: true });
+    try {
+      const result = await analyzeGeometry(geometry.points, geometry.triangles, userQuery);
+      setAiAnalysis({ text: result, loading: false });
+    } catch (e) {
+      setAiAnalysis({ text: "Error connecting to AI service.", loading: false });
+    }
+  };
+
+  const totalArea = geometry.triangles.reduce((acc, t) => acc + t.area, 0);
+
+  // Determine Input Panel Props
+  let inputMode: 'ROOT' | 'ATTACH' | 'EDIT_ROOT' | 'EDIT_ATTACHED' | null = null;
+  let inputInitialValues = undefined;
+  let inputSubmit = undefined;
+  let inputCancel = undefined;
+
+  const editingDef = editingId ? defs.find(d => d.id === editingId) : null;
+
+  if (editingDef) {
+    inputMode = editingDef.isRoot ? 'EDIT_ROOT' : 'EDIT_ATTACHED';
+    inputInitialValues = editingDef.isRoot 
+        ? { s1: editingDef.sideA, s2: editingDef.sideB, s3: editingDef.sideC }
+        : { s1: editingDef.sideLeft, s2: editingDef.sideRight };
+    inputSubmit = handleUpdateTriangle;
+    inputCancel = () => setEditingId(null);
+  } else if (defs.length === 0) {
+    inputMode = 'ROOT';
+    inputInitialValues = { s1: 5, s2: 5, s3: 5 }; // Default suggestions
+    inputSubmit = handleAddRootTriangle;
+  } else if (selectedEdge) {
+    inputMode = 'ATTACH';
+    // Suggestions for new triangle (User can type over these)
+    inputInitialValues = { s1: 5, s2: 5 }; 
+    inputSubmit = handleAddAttachedTriangle;
+    inputCancel = () => setSelectedEdge(null);
+  }
+
+  const parentTriangleName = selectedEdge 
+    ? geometry.triangles.find(t => t.id === selectedEdge.triangleId)?.name 
+    : '';
+
+  // Calculate which edges are already occupied (have a child triangle attached)
+  // Format: "triangleId-edgeIndex"
+  // We need to mark BOTH the parent's edge AND the child's Ref edge (index 0) as occupied
+  const occupiedEdges = useMemo(() => {
+    const occupied = new Set<string>();
+    defs.forEach(d => {
+      if (!d.isRoot && d.attachedToTriangleId !== undefined && d.attachedEdgeIndex !== undefined) {
+        // Mark the parent's edge as occupied
+        const parentEdgeKey = `${d.attachedToTriangleId}-${d.attachedEdgeIndex}`;
+        occupied.add(parentEdgeKey);
+        // Mark the child's Ref edge (edge 0) as occupied too
+        const childRefEdgeKey = `${d.id}-0`;
+        occupied.add(childRefEdgeKey);
+      }
+    });
+    return occupied;
+  }, [defs]);
+
+  // Calculate Phantom Triangle (Preview)
+  const phantomTriangle = useMemo(() => {
+    if (!selectedEdge || !inputMode || inputMode !== 'ATTACH') return null;
+
+    const parent = geometry.triangles.find(t => t.id === selectedEdge.triangleId);
+    if (!parent) return null;
+
+    // Use current input values, or defaults if invalid/empty
+    const sL = parseFloat(currentInputValues.s1) || 5;
+    const sR = parseFloat(currentInputValues.s2) || 5;
+
+    return calculateAttachedTriangle(parent, {
+        sideLeft: sL,
+        sideRight: sR,
+        attachedEdgeIndex: selectedEdge.edgeIndex,
+        color: '#94a3b8'
+    });
+  }, [selectedEdge, inputMode, currentInputValues, geometry.triangles]);
+
+  const handlePhantomClick = () => {
+      // Trigger add with current values
+      if (inputMode === 'ATTACH') {
+          const val = {
+              s1: currentInputValues.s1 || '5',
+              s2: currentInputValues.s2 || '5'
+          };
+          handleAddAttachedTriangle(val);
+      }
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-slate-50">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shadow-sm z-20">
+        <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-lg text-white">
+                <Calculator size={20} />
+            </div>
+            <div>
+                <h1 className="text-lg font-bold text-slate-800 tracking-tight">GeoSolver: Triangulation</h1>
+                <p className="text-[10px] text-slate-500 uppercase tracking-wider">Area Unfolding Tool</p>
+            </div>
+        </div>
+        <div className="flex items-center gap-2">
+             <button
+                 onClick={handleReload}
+                 className="text-xs text-blue-600 font-medium px-3 py-1.5 hover:bg-blue-50 rounded transition-colors flex items-center gap-1.5"
+                 title="ページをリロード"
+             >
+                 <RefreshCw size={14} />
+                 リロード
+             </button>
+             <button
+                 onClick={() => downloadDXF(geometry.triangles)}
+                 className="text-xs text-green-600 font-medium px-3 py-1.5 hover:bg-green-50 rounded transition-colors flex items-center gap-1.5"
+                 title="DXF形式でエクスポート"
+             >
+                 <Download size={14} />
+                 DXF
+             </button>
+             <button onClick={handleClear} className="text-xs text-red-600 font-medium px-3 py-1.5 hover:bg-red-50 rounded transition-colors">
+                 Reset All
+             </button>
+             <div className="bg-slate-100 px-3 py-1.5 rounded text-xs font-mono text-slate-600 border border-slate-200">
+                 Total Area: <span className="font-bold text-slate-900">{totalArea.toFixed(2)}</span>
+             </div>
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        
+        {/* Left: Canvas Area */}
+        <div className="flex-1 flex flex-col relative bg-slate-100">
+          <GeometryCanvas
+            triangles={geometry.triangles}
+            phantomTriangle={phantomTriangle}
+            mode={ToolMode.VIEW}
+            selectedTriangleId={selectedTriangleId}
+            onSelectTriangle={setSelectedTriangleId}
+            onEdgeSelect={(tId, idx) => {
+                if (!editingId) setSelectedEdge({ triangleId: tId, edgeIndex: idx });
+            }}
+            onEdgeDoubleClick={handleEdgeDoubleClick}
+            onDimensionChange={handleDimensionUpdate}
+            onAddAttachedTriangle={handleCanvasAddTriangle}
+            onVertexReshape={handleVertexReshape}
+            onPhantomClick={handlePhantomClick}
+            onBackgroundClick={handleBackgroundClick}
+            selectedEdge={selectedEdge}
+            occupiedEdges={occupiedEdges}
+          />
+
+          {/* Prompt Overlay */}
+          {!inputMode && (
+             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur px-4 py-2 rounded-full shadow-lg border border-blue-100 text-sm text-blue-800 animate-in fade-in slide-in-from-top-4 pointer-events-none">
+                👆 Drag an edge to add a triangle or click a dimension to edit
+             </div>
+          )}
+        </div>
+
+        {/* Right: Sidebar - Widened to w-96 */}
+        <div className="w-96 bg-white border-l border-slate-200 flex flex-col shadow-xl z-20">
+          
+          {/* Input Area (Dynamic) */}
+          {inputMode ? (
+              <InputPanel 
+                key={inputMode + (editingId || selectedEdge?.triangleId || selectedEdge?.edgeIndex || 'root')}
+                mode={inputMode}
+                parentTriangleName={parentTriangleName}
+                initialValues={inputInitialValues}
+                onSubmit={inputSubmit}
+                onCancel={inputCancel}
+                onValuesChange={setCurrentInputValues}
+              />
+          ) : (
+             <div className="p-6 text-center text-slate-400 bg-slate-50 border-b border-slate-100">
+                <p className="text-sm">Select an edge to add attached triangle.</p>
+                <p className="text-xs mt-2 opacity-70">Single click a dimension on canvas to edit it.</p>
+             </div>
+          )}
+
+          {/* List Title */}
+          <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+            <h2 className="text-sm font-semibold text-slate-700">Triangle List</h2>
+            <span className="text-xs bg-white border px-2 py-0.5 rounded text-slate-500">{defs.length}</span>
+          </div>
+
+          {/* List Content */}
+          <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50">
+            {defs.map(def => (
+                <TriangleListItem
+                    key={def.id}
+                    def={def}
+                    isSelected={selectedTriangleId === def.id || editingId === def.id}
+                    onSelect={setSelectedTriangleId}
+                    onDelete={handleDelete}
+                    onEdit={() => handleEdit(def.id)}
+                />
+            ))}
+          </div>
+
+          {/* AI Analysis Section */}
+          <div className="p-4 border-t border-slate-200 bg-white">
+            <div className="flex items-center gap-2 mb-2 text-blue-600 font-medium text-sm">
+                <BrainCircuit size={16} />
+                <span>AI Geometric Assistant</span>
+            </div>
+            
+            <textarea
+                className="w-full text-xs border border-slate-300 rounded-md p-2 mb-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none bg-slate-50"
+                rows={2}
+                placeholder="Ask about shape, area, or layout..."
+                value={userQuery}
+                onChange={(e) => setUserQuery(e.target.value)}
+            />
+            
+            <button
+                onClick={handleAskAI}
+                disabled={aiAnalysis.loading || defs.length === 0}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white py-2 rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-2"
+            >
+                {aiAnalysis.loading ? (
+                    <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
+                ) : (
+                    <Sparkles size={14} />
+                )}
+                Analyze Structure
+            </button>
+
+            {aiAnalysis.text && (
+                <div className="mt-3 p-3 bg-slate-50 rounded border border-slate-200 text-xs text-slate-700 max-h-32 overflow-y-auto leading-relaxed">
+                    {aiAnalysis.text}
+                </div>
+            )}
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
+
+
+// ============================================================
+// FILE: ./index.tsx
+// ============================================================
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+// ============================================================
+// FILE: ./vite.config.ts
+// ============================================================
+
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      server: {
+        port: 3000,
+        host: '0.0.0.0',
+      },
+      plugins: [react()],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
+});
+
