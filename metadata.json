@@ -1,0 +1,5 @@
+{
+  "name": "GeoSolver: TriangleList",
+  "description": "A comprehensive interactive geometry tool for creating, managing, and analyzing lists of triangles (TriangleList) and their area unfolding properties. Features AI-powered geometric reasoning.",
+  "requestFramePermissions": []
+}
