@@ -23,12 +23,16 @@ export interface TriangleDef {
   id: string;
   name: string;
   color: string;
-  
+
   // For the very first triangle (Root)
   isRoot: boolean;
   sideA?: number; // Base
   sideB?: number; // Left
   sideC?: number; // Right
+
+  // Origin offset for root triangle (if created from standalone edge)
+  originP1?: Point; // Start point of base edge
+  originP2?: Point; // End point of base edge
 
   // For attached triangles
   attachedToTriangleId?: string;
@@ -53,4 +57,12 @@ export interface AIAnalysisResult {
   text: string;
   loading: boolean;
   error?: string;
+}
+
+// Standalone edge (not part of a triangle yet)
+export interface StandaloneEdge {
+  id: string;
+  p1: Point;
+  p2: Point;
+  length: number;
 }

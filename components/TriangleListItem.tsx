@@ -9,15 +9,25 @@ interface TriangleListItemProps {
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onEdit: (id: string) => void;
+  parentName?: string; // Name of the parent triangle (e.g., "T1")
 }
 
-const TriangleListItem: React.FC<TriangleListItemProps> = ({ 
-  def, 
-  isSelected, 
+const TriangleListItem: React.FC<TriangleListItemProps> = ({
+  def,
+  isSelected,
   onSelect,
   onDelete,
-  onEdit
+  onEdit,
+  parentName
 }) => {
+  // Get edge label based on attachedEdgeIndex
+  // Edge 0 = A (p1-p2), Edge 1 = C (p2-p3), Edge 2 = B (p3-p1)
+  const getEdgeLabel = (edgeIndex: number | undefined): string => {
+    if (edgeIndex === 0) return 'A';
+    if (edgeIndex === 1) return 'C';
+    if (edgeIndex === 2) return 'B';
+    return '?';
+  };
   return (
     <div 
       className={`p-3 border rounded-lg mb-2 transition-all cursor-pointer relative group ${
@@ -67,7 +77,7 @@ const TriangleListItem: React.FC<TriangleListItemProps> = ({
             <span className="bg-slate-100 px-2 py-1 rounded flex-1 text-center min-w-0 truncate" title={`Left: ${def.sideLeft}`}>L:{def.sideLeft}</span>
             <span className="bg-slate-100 px-2 py-1 rounded flex-1 text-center min-w-0 truncate" title={`Right: ${def.sideRight}`}>R:{def.sideRight}</span>
             <ArrowRight size={12} className="text-slate-400 flex-shrink-0"/>
-            <span className="truncate flex-1 text-right text-[10px]">Ref:{def.attachedToTriangleId?.substring(0,4)}</span>
+            <span className="truncate flex-1 text-right text-[10px]">{parentName || '?'}-{getEdgeLabel(def.attachedEdgeIndex)}</span>
           </div>
         )}
       </div>

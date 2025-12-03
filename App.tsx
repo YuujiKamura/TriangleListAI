@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { RenderedTriangle, TriangleDef, AIAnalysisResult, ToolMode } from './types';
-import { generateId, recalculateGeometry, calculateAttachedTriangle, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
+import { RenderedTriangle, TriangleDef, AIAnalysisResult, ToolMode, StandaloneEdge, Point } from './types';
+import { generateId, recalculateGeometry, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
 import { PALETTE } from './constants';
 import { analyzeGeometry } from './services/geminiService';
 import GeometryCanvas from './components/GeometryCanvas';
 import TriangleListItem from './components/TriangleListItem';
 import InputPanel from './components/Toolbar';
-import { BrainCircuit, Sparkles, Calculator, RefreshCw, Download } from 'lucide-react';
+import { BrainCircuit, Sparkles, Calculator, RefreshCw, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { downloadDXF } from './utils/dxfExport';
 
 const App: React.FC = () => {
@@ -48,6 +48,83 @@ const App: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisResult>({ text: "", loading: false });
   const [userQuery, setUserQuery] = useState("");
 
+  // Sidebar state (default open)
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Standalone edges (for starting without triangles)
+  const [standaloneEdges, setStandaloneEdges] = useState<StandaloneEdge[]>([]);
+
+  // Check if two line segments overlap (share the same line and have overlapping ranges)
+  const edgesOverlap = (edge: StandaloneEdge, p1: Point, p2: Point, tolerance: number = 0.1): boolean => {
+    // Check if all 4 points are collinear
+    const cross1 = (p2.x - p1.x) * (edge.p1.y - p1.y) - (p2.y - p1.y) * (edge.p1.x - p1.x);
+    const cross2 = (p2.x - p1.x) * (edge.p2.y - p1.y) - (p2.y - p1.y) * (edge.p2.x - p1.x);
+
+    // If not collinear, no overlap
+    const edgeLen = distance(p1, p2);
+    if (Math.abs(cross1) > tolerance * edgeLen || Math.abs(cross2) > tolerance * edgeLen) {
+      return false;
+    }
+
+    // Check if the standalone edge endpoints are within or very close to the triangle edge
+    // Project edge points onto the line segment p1-p2
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq === 0) return false;
+
+    // Get projection parameters for both edge endpoints
+    const t1 = ((edge.p1.x - p1.x) * dx + (edge.p1.y - p1.y) * dy) / lenSq;
+    const t2 = ((edge.p2.x - p1.x) * dx + (edge.p2.y - p1.y) * dy) / lenSq;
+
+    // Check perpendicular distance from edge endpoints to the line
+    const proj1X = p1.x + t1 * dx;
+    const proj1Y = p1.y + t1 * dy;
+    const proj2X = p1.x + t2 * dx;
+    const proj2Y = p1.y + t2 * dy;
+
+    const dist1 = Math.sqrt((edge.p1.x - proj1X) ** 2 + (edge.p1.y - proj1Y) ** 2);
+    const dist2 = Math.sqrt((edge.p2.x - proj2X) ** 2 + (edge.p2.y - proj2Y) ** 2);
+
+    // If points are not close to the line, no overlap
+    if (dist1 > tolerance || dist2 > tolerance) {
+      return false;
+    }
+
+    // Check if the segments overlap: standalone edge must be mostly within the triangle edge
+    // The standalone edge overlaps if both its endpoints project onto (or near) the triangle edge
+    const minT = Math.min(t1, t2);
+    const maxT = Math.max(t1, t2);
+
+    // Allow some tolerance outside the segment
+    const toleranceT = tolerance / Math.sqrt(lenSq);
+
+    // Check if there's significant overlap (standalone edge is at least partially within triangle edge)
+    return maxT >= -toleranceT && minT <= 1 + toleranceT;
+  };
+
+  // Garbage collect standalone edges that overlap with triangle edges
+  const garbageCollectEdges = (triangleList: RenderedTriangle[], edges: StandaloneEdge[]): StandaloneEdge[] => {
+    return edges.filter(edge => {
+      // Check against all triangle edges
+      for (const t of triangleList) {
+        const triangleEdges: [Point, Point][] = [
+          [t.p1, t.p2],
+          [t.p2, t.p3],
+          [t.p3, t.p1]
+        ];
+
+        for (const [tp1, tp2] of triangleEdges) {
+          if (edgesOverlap(edge, tp1, tp2)) {
+            return false; // Edge overlaps, should be removed
+          }
+        }
+      }
+      return true; // No overlap, keep the edge
+    });
+  };
+
   // Persist to localStorage whenever defs change
   useEffect(() => {
     localStorage.setItem('geosolver_triangle_defs', JSON.stringify(defs));
@@ -57,6 +134,14 @@ const App: React.FC = () => {
   useEffect(() => {
     const calculated = recalculateGeometry(defs);
     setGeometry(calculated);
+
+    // Garbage collect standalone edges that now overlap with triangle edges
+    if (calculated.triangles.length > 0 && standaloneEdges.length > 0) {
+      const remainingEdges = garbageCollectEdges(calculated.triangles, standaloneEdges);
+      if (remainingEdges.length !== standaloneEdges.length) {
+        setStandaloneEdges(remainingEdges);
+      }
+    }
   }, [defs]);
 
   // Handlers
@@ -136,11 +221,12 @@ const App: React.FC = () => {
 
       if (d.isRoot) {
         // For root triangle, update sideB (left) and sideC (right), keep sideA (base)
+        // Note: geometryUtils uses !def.flip for root triangles, so we invert here
         return {
           ...d,
           sideB: parseFloat(sideLeft.toFixed(2)),
           sideC: parseFloat(sideRight.toFixed(2)),
-          flip: flip
+          flip: !flip
         };
       } else {
         // For attached triangle, update sideLeft and sideRight
@@ -152,6 +238,42 @@ const App: React.FC = () => {
         };
       }
     }));
+  };
+
+  // Add a standalone edge
+  const handleAddStandaloneEdge = (p1: Point, p2: Point) => {
+    const len = distance(p1, p2);
+    const newEdge: StandaloneEdge = {
+      id: generateId(),
+      p1,
+      p2,
+      length: parseFloat(len.toFixed(2))
+    };
+    setStandaloneEdges(prev => [...prev, newEdge]); // Allow multiple edges
+  };
+
+  // Create triangle from a standalone edge
+  const handleAddTriangleFromEdge = (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => {
+    const edge = standaloneEdges.find(e => e.id === edgeId);
+    if (!edge) return;
+
+    // Create root triangle with the edge as side A, preserving edge position
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: true,
+      sideA: edge.length,
+      sideB: parseFloat(sideLeft.toFixed(2)),
+      sideC: parseFloat(sideRight.toFixed(2)),
+      originP1: edge.p1, // Use original edge coordinates
+      originP2: edge.p2,
+      flip: !flip // Invert because geometryUtils uses !flip for root
+    };
+
+    setDefs(prev => [...prev, newDef]);
+    // Remove only this edge, keep others
+    setStandaloneEdges(prev => prev.filter(e => e.id !== edgeId));
   };
 
   const handleEdit = (id: string) => {
@@ -258,12 +380,63 @@ const App: React.FC = () => {
     return true;
   };
 
+  // Renumber triangles sequentially (T1, T2, T3, ...)
+  const renumberTriangles = (triangleDefs: TriangleDef[]): TriangleDef[] => {
+    return triangleDefs.map((def, index) => ({
+      ...def,
+      name: `T${index + 1}`
+    }));
+  };
+
   const handleDelete = (id: string) => {
     if(window.confirm("Delete this triangle? Attached triangles may disappear.")) {
-        setDefs(defs.filter(d => d.id !== id && d.attachedToTriangleId !== id));
+        const filtered = defs.filter(d => d.id !== id && d.attachedToTriangleId !== id);
+        setDefs(renumberTriangles(filtered));
         if (selectedTriangleId === id) setSelectedTriangleId(null);
         if (editingId === id) setEditingId(null);
     }
+  };
+
+  // Delete triangle via long press (no confirmation needed)
+  const handleDeleteTriangle = (id: string) => {
+    const filtered = defs.filter(d => d.id !== id && d.attachedToTriangleId !== id);
+    setDefs(renumberTriangles(filtered));
+    if (selectedTriangleId === id) setSelectedTriangleId(null);
+    if (editingId === id) setEditingId(null);
+  };
+
+  // Delete standalone edge via long press
+  const handleDeleteStandaloneEdge = (id: string) => {
+    setStandaloneEdges(prev => prev.filter(e => e.id !== id));
+  };
+
+  // Update standalone edge length
+  const handleUpdateStandaloneEdgeLength = (id: string, newLength: number) => {
+    if (newLength <= 0) return;
+
+    setStandaloneEdges(prev => prev.map(edge => {
+      if (edge.id !== id) return edge;
+
+      // Scale the edge from p1 towards p2
+      const dx = edge.p2.x - edge.p1.x;
+      const dy = edge.p2.y - edge.p1.y;
+      const currentLen = Math.sqrt(dx * dx + dy * dy);
+
+      if (currentLen === 0) return edge;
+
+      const scale = newLength / currentLen;
+      const newP2: Point = {
+        id: edge.p2.id,
+        x: edge.p1.x + dx * scale,
+        y: edge.p1.y + dy * scale
+      };
+
+      return {
+        ...edge,
+        p2: newP2,
+        length: newLength
+      };
+    }));
   };
 
   const handleClear = () => {
@@ -356,36 +529,6 @@ const App: React.FC = () => {
     return occupied;
   }, [defs]);
 
-  // Calculate Phantom Triangle (Preview)
-  const phantomTriangle = useMemo(() => {
-    if (!selectedEdge || !inputMode || inputMode !== 'ATTACH') return null;
-
-    const parent = geometry.triangles.find(t => t.id === selectedEdge.triangleId);
-    if (!parent) return null;
-
-    // Use current input values, or defaults if invalid/empty
-    const sL = parseFloat(currentInputValues.s1) || 5;
-    const sR = parseFloat(currentInputValues.s2) || 5;
-
-    return calculateAttachedTriangle(parent, {
-        sideLeft: sL,
-        sideRight: sR,
-        attachedEdgeIndex: selectedEdge.edgeIndex,
-        color: '#94a3b8'
-    });
-  }, [selectedEdge, inputMode, currentInputValues, geometry.triangles]);
-
-  const handlePhantomClick = () => {
-      // Trigger add with current values
-      if (inputMode === 'ATTACH') {
-          const val = {
-              s1: currentInputValues.s1 || '5',
-              s2: currentInputValues.s2 || '5'
-          };
-          handleAddAttachedTriangle(val);
-      }
-  };
-
   return (
     <div className="flex flex-col h-screen bg-slate-50">
       {/* Header */}
@@ -425,13 +568,12 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden relative">
         
         {/* Left: Canvas Area */}
         <div className="flex-1 flex flex-col relative bg-slate-100">
           <GeometryCanvas
             triangles={geometry.triangles}
-            phantomTriangle={phantomTriangle}
             mode={ToolMode.VIEW}
             selectedTriangleId={selectedTriangleId}
             onSelectTriangle={setSelectedTriangleId}
@@ -442,10 +584,15 @@ const App: React.FC = () => {
             onDimensionChange={handleDimensionUpdate}
             onAddAttachedTriangle={handleCanvasAddTriangle}
             onVertexReshape={handleVertexReshape}
-            onPhantomClick={handlePhantomClick}
             onBackgroundClick={handleBackgroundClick}
             selectedEdge={selectedEdge}
             occupiedEdges={occupiedEdges}
+            standaloneEdges={standaloneEdges}
+            onAddStandaloneEdge={handleAddStandaloneEdge}
+            onAddTriangleFromEdge={handleAddTriangleFromEdge}
+            onDeleteTriangle={handleDeleteTriangle}
+            onDeleteStandaloneEdge={handleDeleteStandaloneEdge}
+            onUpdateStandaloneEdgeLength={handleUpdateStandaloneEdgeLength}
           />
 
           {/* Prompt Overlay */}
@@ -456,83 +603,101 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Right: Sidebar - Widened to w-96 */}
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col shadow-xl z-20">
-          
-          {/* Input Area (Dynamic) */}
-          {inputMode ? (
-              <InputPanel 
-                key={inputMode + (editingId || selectedEdge?.triangleId || selectedEdge?.edgeIndex || 'root')}
-                mode={inputMode}
-                parentTriangleName={parentTriangleName}
-                initialValues={inputInitialValues}
-                onSubmit={inputSubmit}
-                onCancel={inputCancel}
-                onValuesChange={setCurrentInputValues}
-              />
-          ) : (
-             <div className="p-6 text-center text-slate-400 bg-slate-50 border-b border-slate-100">
-                <p className="text-sm">Select an edge to add attached triangle.</p>
-                <p className="text-xs mt-2 opacity-70">Single click a dimension on canvas to edit it.</p>
-             </div>
-          )}
+        {/* Right: Collapsible Sidebar */}
+        <div className={`${sidebarOpen ? 'w-96' : 'w-0'} bg-white border-l border-slate-200 flex flex-col shadow-xl z-20 transition-all duration-300 overflow-hidden`}>
+          {sidebarOpen && (
+            <>
+              {/* Input Area (Dynamic) */}
+              {inputMode ? (
+                  <InputPanel
+                    key={inputMode + (editingId || selectedEdge?.triangleId || selectedEdge?.edgeIndex || 'root')}
+                    mode={inputMode}
+                    parentTriangleName={parentTriangleName}
+                    initialValues={inputInitialValues}
+                    onSubmit={inputSubmit}
+                    onCancel={inputCancel}
+                    onValuesChange={setCurrentInputValues}
+                  />
+              ) : (
+                 <div className="p-6 text-center text-slate-400 bg-slate-50 border-b border-slate-100">
+                    <p className="text-sm">Select an edge to add attached triangle.</p>
+                    <p className="text-xs mt-2 opacity-70">Single click a dimension on canvas to edit it.</p>
+                 </div>
+              )}
 
-          {/* List Title */}
-          <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-            <h2 className="text-sm font-semibold text-slate-700">Triangle List</h2>
-            <span className="text-xs bg-white border px-2 py-0.5 rounded text-slate-500">{defs.length}</span>
-          </div>
+              {/* List Title */}
+              <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                <h2 className="text-sm font-semibold text-slate-700">Triangle List</h2>
+                <span className="text-xs bg-white border px-2 py-0.5 rounded text-slate-500">{defs.length}</span>
+              </div>
 
-          {/* List Content */}
-          <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50">
-            {defs.map(def => (
-                <TriangleListItem
-                    key={def.id}
-                    def={def}
-                    isSelected={selectedTriangleId === def.id || editingId === def.id}
-                    onSelect={setSelectedTriangleId}
-                    onDelete={handleDelete}
-                    onEdit={() => handleEdit(def.id)}
-                />
-            ))}
-          </div>
+              {/* List Content */}
+              <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50">
+                {defs.map(def => {
+                    // Find parent triangle name for attached triangles
+                    const parentDef = def.attachedToTriangleId
+                      ? defs.find(d => d.id === def.attachedToTriangleId)
+                      : null;
+                    return (
+                      <TriangleListItem
+                          key={def.id}
+                          def={def}
+                          isSelected={selectedTriangleId === def.id || editingId === def.id}
+                          onSelect={setSelectedTriangleId}
+                          onDelete={handleDelete}
+                          onEdit={() => handleEdit(def.id)}
+                          parentName={parentDef?.name}
+                      />
+                    );
+                })}
+              </div>
 
-          {/* AI Analysis Section */}
-          <div className="p-4 border-t border-slate-200 bg-white">
-            <div className="flex items-center gap-2 mb-2 text-blue-600 font-medium text-sm">
-                <BrainCircuit size={16} />
-                <span>AI Geometric Assistant</span>
-            </div>
-            
-            <textarea
-                className="w-full text-xs border border-slate-300 rounded-md p-2 mb-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none bg-slate-50"
-                rows={2}
-                placeholder="Ask about shape, area, or layout..."
-                value={userQuery}
-                onChange={(e) => setUserQuery(e.target.value)}
-            />
-            
-            <button
-                onClick={handleAskAI}
-                disabled={aiAnalysis.loading || defs.length === 0}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white py-2 rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-2"
-            >
-                {aiAnalysis.loading ? (
-                    <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
-                ) : (
-                    <Sparkles size={14} />
-                )}
-                Analyze Structure
-            </button>
-
-            {aiAnalysis.text && (
-                <div className="mt-3 p-3 bg-slate-50 rounded border border-slate-200 text-xs text-slate-700 max-h-32 overflow-y-auto leading-relaxed">
-                    {aiAnalysis.text}
+              {/* AI Analysis Section */}
+              <div className="p-4 border-t border-slate-200 bg-white">
+                <div className="flex items-center gap-2 mb-2 text-blue-600 font-medium text-sm">
+                    <BrainCircuit size={16} />
+                    <span>AI Geometric Assistant</span>
                 </div>
-            )}
-          </div>
 
+                <textarea
+                    className="w-full text-xs border border-slate-300 rounded-md p-2 mb-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none bg-slate-50"
+                    rows={2}
+                    placeholder="Ask about shape, area, or layout..."
+                    value={userQuery}
+                    onChange={(e) => setUserQuery(e.target.value)}
+                />
+
+                <button
+                    onClick={handleAskAI}
+                    disabled={aiAnalysis.loading || defs.length === 0}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white py-2 rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-2"
+                >
+                    {aiAnalysis.loading ? (
+                        <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
+                    ) : (
+                        <Sparkles size={14} />
+                    )}
+                    Analyze Structure
+                </button>
+
+                {aiAnalysis.text && (
+                    <div className="mt-3 p-3 bg-slate-50 rounded border border-slate-200 text-xs text-slate-700 max-h-32 overflow-y-auto leading-relaxed">
+                        {aiAnalysis.text}
+                    </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
+
+        {/* Sidebar Toggle Button */}
+        <button
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className="absolute right-0 top-1/2 -translate-y-1/2 bg-white border border-slate-200 rounded-l-md p-2 shadow-md hover:bg-slate-50 z-30"
+          style={{ right: sidebarOpen ? '384px' : '0' }}
+        >
+          {sidebarOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+        </button>
       </div>
     </div>
   );

@@ -71,12 +71,19 @@ export const calculateAttachedTriangle = (
     else { baseP1 = parent.p3; baseP2 = parent.p1; }
 
     const pNew = calculateThirdPoint(baseP1, baseP2, def.sideLeft, def.sideRight, !!def.flip);
-    
+
     if (pNew) {
         pNew.id = `p_${def.id || 'phantom'}_3`;
         const baseLen = distance(baseP1, baseP2);
         const area = calculateHeronArea(baseLen, def.sideLeft, def.sideRight);
-        
+
+        // edgeLabels: [p1-p2, p2-p3, p3-p1]
+        // sideLeft = p1-p3 = B, sideRight = p2-p3 = C
+        // When flipped, the visual positions swap, so labels should swap too
+        const edgeLabels: [string, string, string] = def.flip
+            ? ['Ref', 'B', 'C']  // flipped: p2-p3=B, p3-p1=C
+            : ['Ref', 'C', 'B']; // normal: p2-p3=C, p3-p1=B
+
         return {
             id: def.id || 'phantom',
             name: def.name || 'Phantom',
@@ -86,7 +93,7 @@ export const calculateAttachedTriangle = (
             color: def.color || '#e2e8f0',
             area,
             paramId: def.id || 'phantom',
-            edgeLabels: ['Ref', 'C', 'B']
+            edgeLabels
         };
     }
     return null;
@@ -103,15 +110,22 @@ export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], tri
     // Sort defs to ensure parents are processed before children
     for (const def of defs) {
         if (def.isRoot) {
-            // Place first triangle at origin (0, 0)
             const sa = def.sideA || 10;
             const sb = def.sideB || 10;
             const sc = def.sideC || 10;
 
-            const p1: Point = { id: `p_${def.id}_1`, x: 0, y: 0, label: 'Start' };
-            // Place p2 along the X axis
-            const p2: Point = { id: `p_${def.id}_2`, x: sa, y: 0, label: '' };
-            
+            let p1: Point, p2: Point;
+
+            // Use origin coordinates if provided (from standalone edge), otherwise place at origin
+            if (def.originP1 && def.originP2) {
+                p1 = { id: `p_${def.id}_1`, x: def.originP1.x, y: def.originP1.y, label: 'Start' };
+                p2 = { id: `p_${def.id}_2`, x: def.originP2.x, y: def.originP2.y, label: '' };
+            } else {
+                // Default: place at origin (0, 0) with p2 along X axis
+                p1 = { id: `p_${def.id}_1`, x: 0, y: 0, label: 'Start' };
+                p2 = { id: `p_${def.id}_2`, x: sa, y: 0, label: '' };
+            }
+
             // CONFIGURATION: A=Bottom, B=Left, C=Right
             // Note: In SVG, Y increases downwards. Default calculateThirdPoint (flip=false) results in Positive Y (Down).
             // User requests "Upward Convex" (vertex at top), which requires Negative Y.
@@ -121,6 +135,14 @@ export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], tri
             if (p3) {
                 p3.id = `p_${def.id}_3`;
                 const area = calculateHeronArea(sa, sb, sc);
+
+                // edgeLabels: [p1-p2, p2-p3, p3-p1]
+                // sb = p1-p3 = B (left side), sc = p2-p3 = C (right side)
+                // We use !def.flip for calculation, so labels follow the inverted logic
+                const edgeLabels: [string, string, string] = def.flip
+                    ? ['A', 'B', 'C']  // flipped (calc with false): p2-p3=B, p3-p1=C
+                    : ['A', 'C', 'B']; // normal (calc with true): p2-p3=C, p3-p1=B
+
                 const t: RenderedTriangle = {
                     id: def.id,
                     name: def.name,
@@ -128,7 +150,7 @@ export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], tri
                     color: def.color,
                     area,
                     paramId: def.id,
-                    edgeLabels: ['A', 'C', 'B'] 
+                    edgeLabels
                 };
                 triangles.push(t);
                 triangleMap.set(def.id, t);

@@ -1,13 +1,12 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
 import Konva from 'konva';
-import { RenderedTriangle, ToolMode, Point } from '../types';
+import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
 import { getCentroid, distance, generateId } from '../utils/geometryUtils';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 
 interface GeometryCanvasProps {
   triangles: RenderedTriangle[];
-  phantomTriangle?: RenderedTriangle | null;
   mode: ToolMode;
   selectedTriangleId: string | null;
   onSelectTriangle: (id: string) => void;
@@ -16,10 +15,15 @@ interface GeometryCanvasProps {
   onDimensionChange?: (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number) => boolean;
   onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => void;
   onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
-  onPhantomClick?: () => void;
   onBackgroundClick?: () => void;
   selectedEdge: { triangleId: string, edgeIndex: 0 | 1 | 2 } | null;
   occupiedEdges?: Set<string>;
+  standaloneEdges?: StandaloneEdge[];
+  onAddStandaloneEdge?: (p1: Point, p2: Point) => void;
+  onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onDeleteTriangle?: (id: string) => void;
+  onDeleteStandaloneEdge?: (id: string) => void;
+  onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
 }
 
 type InteractionState =
@@ -29,11 +33,16 @@ type InteractionState =
   | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
   | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
-  | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point };
+  | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'DRAWING_EDGE'; startPoint: Point; currentMouse: Point }
+  | { type: 'STANDALONE_EDGE_PLACING'; edgeId: string; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point };
+
+// Long press duration in milliseconds
+const LONG_PRESS_DURATION = 600;
 
 const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   triangles,
-  phantomTriangle,
   mode,
   selectedTriangleId,
   onSelectTriangle,
@@ -42,13 +51,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   onDimensionChange,
   onAddAttachedTriangle,
   onVertexReshape,
-  onPhantomClick,
   onBackgroundClick,
   selectedEdge,
-  occupiedEdges
+  occupiedEdges,
+  standaloneEdges = [],
+  onAddStandaloneEdge,
+  onAddTriangleFromEdge,
+  onDeleteTriangle,
+  onDeleteStandaloneEdge,
+  onUpdateStandaloneEdgeLength
 }) => {
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const [longPressTarget, setLongPressTarget] = useState<{ type: 'triangle' | 'edge'; id: string; progress: number } | null>(null);
+
+  // Delete confirmation state
+  const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'triangle' | 'edge'; id: string; name: string } | null>(null);
+  const [deleteInput, setDeleteInput] = useState('');
 
   // Viewport state - using scale and position for Konva
   const [stageScale, setStageScale] = useState(1);
@@ -56,6 +76,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [interaction, setInteraction] = useState<InteractionState>({ type: 'IDLE' });
   const [editingDim, setEditingDim] = useState<{ tId: string, index: 0 | 1 | 2, value: string, originalValue: number, label: string } | null>(null);
+  const [editingEdgeDim, setEditingEdgeDim] = useState<{ edgeId: string, value: string, originalValue: number } | null>(null);
   const [editingInputPos, setEditingInputPos] = useState<{ x: number; y: number; angle: number; fontSize: number } | null>(null);
 
   // Initial viewport: -10, -10 to 40, 30 (width: 50, height: 40)
@@ -69,6 +90,106 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     // Cross product of (p2-p1) and (mouse-p1)
     const cross = (p2.x - p1.x) * (mouse.y - p1.y) - (p2.y - p1.y) * (mouse.x - p1.x);
     return cross < 0;
+  }, []);
+
+  // Snap threshold in world units
+  const SNAP_THRESHOLD = 0.5;
+
+  // Get all snap points (triangle vertices and standalone edge endpoints)
+  const getSnapPoints = useCallback((): Point[] => {
+    const points: Point[] = [];
+
+    // Add all triangle vertices
+    triangles.forEach(t => {
+      points.push(t.p1, t.p2, t.p3);
+    });
+
+    // Add standalone edge endpoints
+    standaloneEdges.forEach(e => {
+      points.push(e.p1, e.p2);
+    });
+
+    return points;
+  }, [triangles, standaloneEdges]);
+
+  // Find nearest snap point within threshold
+  const findSnapPoint = useCallback((mouse: Point, excludePoints?: Point[]): Point | null => {
+    const snapPoints = getSnapPoints();
+    let nearest: Point | null = null;
+    let nearestDist = SNAP_THRESHOLD;
+
+    for (const p of snapPoints) {
+      // Skip excluded points (e.g., the base edge endpoints when adding triangle)
+      if (excludePoints?.some(ep => Math.abs(ep.x - p.x) < 0.001 && Math.abs(ep.y - p.y) < 0.001)) {
+        continue;
+      }
+
+      const dist = distance(mouse, p);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = p;
+      }
+    }
+
+    return nearest;
+  }, [getSnapPoints]);
+
+  // Apply snap to a point
+  const applySnap = useCallback((mouse: Point, excludePoints?: Point[]): Point => {
+    const snapPoint = findSnapPoint(mouse, excludePoints);
+    return snapPoint || mouse;
+  }, [findSnapPoint]);
+
+  // Long press handlers
+  const startLongPress = useCallback((type: 'triangle' | 'edge', id: string) => {
+    // Clear any existing timer
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+
+    // Start progress animation
+    setLongPressTarget({ type, id, progress: 0 });
+
+    // Animate progress
+    const startTime = Date.now();
+    const animateProgress = () => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min(elapsed / LONG_PRESS_DURATION, 1);
+
+      if (progress < 1) {
+        setLongPressTarget({ type, id, progress });
+        longPressTimerRef.current = window.setTimeout(animateProgress, 16); // ~60fps
+      } else {
+        // Long press completed - show confirmation dialog
+        setLongPressTarget(null);
+        if (type === 'triangle') {
+          const t = triangles.find(tri => tri.id === id);
+          setDeleteConfirm({ type, id, name: t?.name || 'Triangle' });
+        } else if (type === 'edge') {
+          setDeleteConfirm({ type, id, name: 'Edge' });
+        }
+        setDeleteInput('');
+      }
+    };
+
+    longPressTimerRef.current = window.setTimeout(animateProgress, 16);
+  }, [triangles]);
+
+  const cancelLongPress = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    setLongPressTarget(null);
+  }, []);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+    };
   }, []);
 
   // Convert world coordinates to stage coordinates
@@ -144,9 +265,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             setInteraction({ type: 'IDLE' });
             return;
           }
-          const sideLeft = distance(p1, currentMouse);
-          const sideRight = distance(p2, currentMouse);
-          const flip = isFlipSide(p1, p2, currentMouse);
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
           if (sideLeft > 0 && sideRight > 0) {
             onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
           }
@@ -158,9 +281,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       if (interaction.type === 'VERTEX_RESHAPING') {
         if (onVertexReshape) {
           const { p1, p2, currentMouse, tId } = interaction;
-          const sideLeft = distance(p1, currentMouse);
-          const sideRight = distance(p2, currentMouse);
-          const flip = isFlipSide(p1, p2, currentMouse);
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
           if (sideLeft > 0 && sideRight > 0) {
             onVertexReshape(tId, sideLeft, sideRight, flip);
           }
@@ -168,8 +293,64 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         setInteraction({ type: 'IDLE' });
         return;
       }
+      // If drawing edge, confirm on click
+      if (interaction.type === 'DRAWING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { startPoint, currentMouse } = interaction;
+          // Apply snap (exclude start point)
+          const snappedMouse = applySnap(currentMouse, [startPoint]);
+          const len = distance(startPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(startPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If placing triangle from standalone edge, confirm on click
+      if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+        if (onAddTriangleFromEdge) {
+          const { edgeId, p1, p2, currentMouse } = interaction;
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If extending edge, confirm on click
+      if (interaction.type === 'EXTENDING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { fromPoint, currentMouse } = interaction;
+          // Apply snap (exclude from point)
+          const snappedMouse = applySnap(currentMouse, [fromPoint]);
+          const len = distance(fromPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(fromPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
       setInteraction({ type: 'PAN_READY', startX: e.evt.clientX, startY: e.evt.clientY });
     }
+  };
+
+  // Double click on background to start drawing an edge
+  // This is called from the background Rect, not Stage, to avoid intercepting other element events
+  const handleBackgroundDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Only handle if click target is the background rect itself
+    const targetName = e.target.name();
+    if (targetName !== 'background-rect') return;
+
+    // Allow adding edges anytime
+    const startPoint = getWorldPoint(e);
+    setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
   };
 
   const handleEdgeMouseDown = (e: Konva.KonvaEventObject<MouseEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
@@ -199,32 +380,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       setStagePosition(prev => ({ x: prev.x + dx, y: prev.y + dy }));
       setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
     } else if (interaction.type === 'EDGE_READY') {
+      // Dragging on edge no longer creates triangle - switch to panning instead
       const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
       if (dist > 5) {
-        // Check if this edge is already occupied before allowing drag
-        const isOccupied = occupiedEdges?.has(`${interaction.tId}-${interaction.index}`) || false;
-        if (isOccupied) {
-          // Edge is occupied, cancel drag and switch to panning
-          setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
-          return;
-        }
-        const currentMouse = getWorldPoint(e);
-        setInteraction({
-          type: 'EDGE_DRAGGING',
-          tId: interaction.tId,
-          index: interaction.index,
-          p1: interaction.p1,
-          p2: interaction.p2,
-          currentMouse
-        });
+        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
       }
-    } else if (interaction.type === 'EDGE_DRAGGING') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
     } else if (interaction.type === 'PHANTOM_PLACING') {
       const currentMouse = getWorldPoint(e);
       setInteraction({ ...interaction, currentMouse });
     } else if (interaction.type === 'VERTEX_RESHAPING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'DRAWING_EDGE') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'EXTENDING_EDGE') {
       const currentMouse = getWorldPoint(e);
       setInteraction({ ...interaction, currentMouse });
     }
@@ -232,25 +405,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   const handleMouseUp = () => {
     if (interaction.type === 'EDGE_READY') {
-      // Single click on edge - do nothing (use double click for phantom mode)
-    } else if (interaction.type === 'EDGE_DRAGGING') {
-      if (onAddAttachedTriangle) {
-        const { p1, p2, currentMouse, tId, index } = interaction;
-        // Check if this edge is already occupied
-        const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
-        if (isOccupied) {
-          // Edge already has a child triangle - don't add another
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-        const sideLeft = distance(p1, currentMouse);
-        const sideRight = distance(p2, currentMouse);
-        const flip = isFlipSide(p1, p2, currentMouse);
-        // Only add if both sides are valid (greater than 0)
-        if (sideLeft > 0 && sideRight > 0) {
-          onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
-        }
-      }
+      // Single click on edge - select the edge only (no triangle creation)
+      onEdgeSelect(interaction.tId, interaction.index);
     } else if (interaction.type === 'PAN_READY') {
       if (onBackgroundClick) {
         onBackgroundClick();
@@ -336,16 +492,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const handleLabelClick = (tId: string, index: 0 | 1 | 2, currentLen: number, label: string, labelX: number, labelY: number, angle: number, fontSize: number) => {
     if (label === 'Ref') return;
     setEditingDim({ tId, index, value: currentLen.toFixed(2), originalValue: currentLen, label: label || '' });
-    
+    setEditingEdgeDim(null); // Clear edge editing if any
+
     // Convert Konva stage coordinates to HTML screen coordinates
     if (stageRef.current && containerRef.current) {
       const stage = stageRef.current;
       const containerRect = containerRef.current.getBoundingClientRect();
-      
+
       // Get the actual screen position of the label
       const stageX = (labelX * stage.scaleX()) + stage.x();
       const stageY = (labelY * stage.scaleY()) + stage.y();
-      
+
       setEditingInputPos({
         x: containerRect.left + stageX,
         y: containerRect.top + stageY,
@@ -355,29 +512,56 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     }
   };
 
+  const handleEdgeLabelClick = (edgeId: string, currentLen: number, labelX: number, labelY: number, fontSize: number) => {
+    setEditingEdgeDim({ edgeId, value: currentLen.toFixed(2), originalValue: currentLen });
+    setEditingDim(null); // Clear triangle dim editing if any
+
+    // Convert Konva stage coordinates to HTML screen coordinates
+    if (stageRef.current && containerRef.current) {
+      const stage = stageRef.current;
+      const containerRect = containerRef.current.getBoundingClientRect();
+
+      const stageX = (labelX * stage.scaleX()) + stage.x();
+      const stageY = (labelY * stage.scaleY()) + stage.y();
+
+      setEditingInputPos({
+        x: containerRect.left + stageX,
+        y: containerRect.top + stageY,
+        angle: 0,
+        fontSize: fontSize * stage.scaleX()
+      });
+    }
+  };
+
   const commitEdit = () => {
-    if (!editingDim || !onDimensionChange) {
+    // Handle triangle dimension edit
+    if (editingDim && onDimensionChange) {
+      const val = parseFloat(editingDim.value);
+      if (!isNaN(val) && val > 0) {
+        onDimensionChange(editingDim.tId, editingDim.index, val);
+      }
       setEditingDim(null);
       setEditingInputPos(null);
       return;
     }
-    const val = parseFloat(editingDim.value);
-    if (!isNaN(val) && val > 0) {
-      const success = onDimensionChange(editingDim.tId, editingDim.index, val);
-      if (success) {
-        setEditingDim(null);
-        setEditingInputPos(null);
-      } else {
-        setEditingDim(null);
-        setEditingInputPos(null);
+
+    // Handle standalone edge dimension edit
+    if (editingEdgeDim && onUpdateStandaloneEdgeLength) {
+      const val = parseFloat(editingEdgeDim.value);
+      if (!isNaN(val) && val > 0) {
+        onUpdateStandaloneEdgeLength(editingEdgeDim.edgeId, val);
       }
-    } else {
-      setEditingDim(null);
+      setEditingEdgeDim(null);
       setEditingInputPos(null);
+      return;
     }
+
+    setEditingDim(null);
+    setEditingEdgeDim(null);
+    setEditingInputPos(null);
   };
 
-  // Render Grid
+  // Render Grid with background rect for double-click handling
   const renderGrid = () => {
     const step = 1;
     const startX = Math.floor(worldBounds.x / step) * step;
@@ -385,12 +569,30 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const endX = worldBounds.x + worldBounds.w;
     const endY = worldBounds.y + worldBounds.h;
 
-    const lines = [];
+    const topLeft = worldToStage(worldBounds.x, worldBounds.y);
+    const bottomRight = worldToStage(endX, endY);
+
+    const elements = [];
+
+    // Background rect for catching double-clicks on empty areas
+    elements.push(
+      <Rect
+        key="background-rect"
+        name="background-rect"
+        x={topLeft.x}
+        y={topLeft.y}
+        width={bottomRight.x - topLeft.x}
+        height={bottomRight.y - topLeft.y}
+        fill="transparent"
+        onDblClick={handleBackgroundDblClick}
+      />
+    );
+
     for (let x = startX; x <= endX; x += step) {
       const sp1 = worldToStage(x, worldBounds.y);
       const sp2 = worldToStage(x, endY);
       const isMajor = Math.abs(x % (step * 5)) < 0.001 || Math.abs(x) < 0.001;
-      lines.push(
+      elements.push(
         <Line
           key={`v${x}`}
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
@@ -403,7 +605,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       const sp1 = worldToStage(worldBounds.x, y);
       const sp2 = worldToStage(endX, y);
       const isMajor = Math.abs(y % (step * 5)) < 0.001 || Math.abs(y) < 0.001;
-      lines.push(
+      elements.push(
         <Line
           key={`h${y}`}
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
@@ -412,7 +614,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         />
       );
     }
-    return lines;
+    return elements;
   };
 
   // Render Edge with label
@@ -420,11 +622,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     t: RenderedTriangle,
     pStart: Point,
     pEnd: Point,
-    index: 0 | 1 | 2,
-    isPhantom: boolean = false
+    index: 0 | 1 | 2
   ) => {
     const isSelectedEdge = selectedEdge?.triangleId === t.id && selectedEdge?.edgeIndex === index;
-    const isSelectedTriangle = selectedTriangleId === t.id;
     const isOccupied = occupiedEdges?.has(`${t.id}-${index}`) || false;
     const rawLen = distance(pStart, pEnd);
     const len = rawLen.toFixed(2);
@@ -448,20 +648,15 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     }
 
     // Calculate font size based on world-to-screen scale
-    // Similar to original SVG: uiScale = viewBox.w / 50
     const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
 
     // Calculate text for label
-    // Normal: just the value (e.g. "5.00")
-    // Editing: with label prefix (e.g. "B: 5.00")
     const labelText = len;
-    const editingText = edgeLabel && edgeLabel !== 'Ref' ? `${edgeLabel}: ${editingDim?.value}` : editingDim?.value || '';
 
     // Estimate text width (monospace: ~0.6 * fontSize per character)
     const charWidth = fontSize * 0.6;
     const labelWidth = labelText.length * charWidth;
-    const editingWidth = editingText.length * charWidth;
 
     return (
       <Group key={`edge-${t.id}-${index}`}>
@@ -471,10 +666,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             points={[sp1.x, sp1.y, sp2.x, sp2.y]}
             stroke="transparent"
             strokeWidth={20}
-            onMouseDown={(e) => !isPhantom && !isOccupied && handleEdgeMouseDown(e, t.id, index, pStart, pEnd)}
+            onClick={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                onEdgeSelect(t.id, index);
+              }
+            }}
+            onMouseDown={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
+              }
+            }}
             onDblClick={(e) => {
-              if (!isPhantom && !isOccupied) {
-                e.evt.stopPropagation();
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
                 // Enter phantom placing mode
                 const currentMouse = getWorldPoint(e);
                 setInteraction({
@@ -492,9 +701,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         {/* Visible Edge */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={isSelectedEdge ? "#ef4444" : (isPhantom ? "#94a3b8" : "rgba(0,0,0,0.2)")}
-          strokeWidth={isSelectedEdge ? 2 : 1}
-          dash={isSelectedEdge ? undefined : (isPhantom ? [4, 4] : [8, 8])}
+          stroke="rgba(0,0,0,0.2)"
+          strokeWidth={1}
+          dash={[8, 8]}
         />
         {/* Label - skip rendering for Ref edges (child's shared edge) to avoid duplicate */}
         {edgeLabel !== 'Ref' && !isEditing ? (
@@ -512,7 +721,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               strokeWidth={3}
               offsetX={labelWidth / 2}
               offsetY={fontSize / 2}
-              onClick={() => !isPhantom && handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
+              onClick={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
             />
           </Group>
         ) : null}
@@ -521,9 +730,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   };
 
   // Render Triangle Fill only (for bottom layer)
-  const renderTriangleFill = (t: RenderedTriangle, isPhantom: boolean = false) => {
+  const renderTriangleFill = (t: RenderedTriangle) => {
     const isSelected = selectedTriangleId === t.id;
     const isEditingAnyEdge = editingDim?.tId === t.id;
+    const isLongPressing = longPressTarget?.type === 'triangle' && longPressTarget?.id === t.id;
 
     const sp1 = worldToStage(t.p1.x, t.p1.y);
     const sp2 = worldToStage(t.p2.x, t.p2.y);
@@ -540,37 +750,61 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           context.closePath();
           context.fillStrokeShape(shape);
         }}
-        fill={isPhantom ? "#cbd5e1" : "#94a3b8"}
-        opacity={isPhantom ? 0.3 : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
-        stroke={isPhantom ? "#94a3b8" : "#64748b"}
-        strokeWidth={isSelected ? 2 : 1}
-        dash={isPhantom ? [4, 4] : undefined}
-        onClick={() => {
-          if (isPhantom && onPhantomClick) {
-            onPhantomClick();
-          } else {
-            onSelectTriangle(t.id);
+        fill={isLongPressing ? "#ef4444" : "#94a3b8"}
+        opacity={isLongPressing ? (0.2 + longPressTarget!.progress * 0.4) : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
+        stroke={isLongPressing ? "#ef4444" : "#64748b"}
+        strokeWidth={isSelected || isLongPressing ? 2 : 1}
+        onMouseDown={(e) => {
+          if (e.evt.button === 0) {
+            startLongPress('triangle', t.id);
           }
         }}
+        onMouseUp={() => {
+          cancelLongPress();
+        }}
+        onMouseLeave={() => {
+          cancelLongPress();
+        }}
+        onClick={() => {
+          cancelLongPress();
+          onSelectTriangle(t.id);
+        }}
+      />
+    );
+  };
+
+  // Render a vertex marker (for extending edges from triangle vertices)
+  const renderVertexMarker = (point: Point, triangleId: string) => {
+    const sp = worldToStage(point.x, point.y);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const radius = Math.max(4, 0.4 * uiScale);
+
+    return (
+      <Circle
+        key={`vertex-${triangleId}-${point.id}`}
+        x={sp.x}
+        y={sp.y}
+        radius={radius}
+        fill="#64748b"
+        stroke="white"
+        strokeWidth={1}
+        opacity={0.7}
         onDblClick={(e) => {
-          if (!isPhantom) {
-            e.evt.stopPropagation();
-            // Enter vertex reshaping mode
-            setInteraction({
-              type: 'VERTEX_RESHAPING',
-              tId: t.id,
-              p1: t.p1,
-              p2: t.p2,
-              currentMouse: t.p3
-            });
-          }
+          e.evt.stopPropagation();
+          // Start extending edge from this vertex
+          setInteraction({
+            type: 'EXTENDING_EDGE',
+            fromEdgeId: triangleId, // Using triangle ID as reference
+            fromPoint: point,
+            currentMouse: point
+          });
         }}
       />
     );
   };
 
   // Render Triangle Labels (edges and centroid label) - for top layer
-  const renderTriangleLabels = (t: RenderedTriangle, isPhantom: boolean = false) => {
+  const renderTriangleLabels = (t: RenderedTriangle) => {
     const centroid = getCentroid(t);
     const labelPos = worldToStage(centroid.x, centroid.y);
 
@@ -581,64 +815,290 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     return (
       <Group key={`labels-${t.id}`}>
         {/* Edges */}
-        {renderEdge(t, t.p1, t.p2, 0, isPhantom)}
-        {renderEdge(t, t.p2, t.p3, 1, isPhantom)}
-        {renderEdge(t, t.p3, t.p1, 2, isPhantom)}
+        {renderEdge(t, t.p1, t.p2, 0)}
+        {renderEdge(t, t.p2, t.p3, 1)}
+        {renderEdge(t, t.p3, t.p1, 2)}
+        {/* Vertex markers for extending edges */}
+        {renderVertexMarker(t.p1, t.id)}
+        {renderVertexMarker(t.p2, t.id)}
+        {renderVertexMarker(t.p3, t.id)}
         {/* Triangle Number in Circle */}
-        {isPhantom ? (
-          <Text
-            x={labelPos.x}
-            y={labelPos.y}
-            text="+"
-            fontSize={fontSize}
-            fontStyle="bold"
-            fill="#334155"
-            opacity={0.5}
-            offsetX={fontSize * 0.3}
-            offsetY={fontSize / 2}
+        <Group
+          x={labelPos.x}
+          y={labelPos.y}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Enter vertex reshaping mode
+            setInteraction({
+              type: 'VERTEX_RESHAPING',
+              tId: t.id,
+              p1: t.p1,
+              p2: t.p2,
+              currentMouse: t.p3
+            });
+          }}
+        >
+          <Circle
+            x={0}
+            y={0}
+            radius={fontSize * 0.7}
+            fill={selectedTriangleId === t.id ? "#fef08a" : "white"}
+            stroke={selectedTriangleId === t.id ? "#facc15" : "#3b82f6"}
+            strokeWidth={selectedTriangleId === t.id ? 3 : 2}
+            opacity={0.9}
           />
-        ) : (
-          <Group x={labelPos.x} y={labelPos.y}>
-            <Circle
-              x={0}
-              y={0}
-              radius={fontSize * 0.7}
-              fill="white"
-              stroke="#3b82f6"
-              strokeWidth={2}
-              opacity={0.9}
-            />
-            <Text
-              x={0}
-              y={0}
-              text={t.name.replace(/\D/g, '')}
-              fontSize={fontSize * 0.8}
-              fontStyle="bold"
-              fill="#3b82f6"
-              offsetX={t.name.replace(/\D/g, '').length * fontSize * 0.24}
-              offsetY={fontSize * 0.4}
-            />
-          </Group>
+          <Text
+            x={0}
+            y={0}
+            text={t.name.replace(/\D/g, '')}
+            fontSize={fontSize * 0.8}
+            fontStyle="bold"
+            fill={selectedTriangleId === t.id ? "#ca8a04" : "#3b82f6"}
+            offsetX={t.name.replace(/\D/g, '').length * fontSize * 0.24}
+            offsetY={fontSize * 0.4}
+          />
+        </Group>
+      </Group>
+    );
+  };
+
+  // Render selected edge highlight (separate layer for visibility)
+  const renderSelectedEdgeHighlight = () => {
+    if (!selectedEdge) return null;
+
+    const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
+    if (!t) return null;
+
+    let p1: Point, p2: Point;
+    if (selectedEdge.edgeIndex === 0) {
+      p1 = t.p1; p2 = t.p2;
+    } else if (selectedEdge.edgeIndex === 1) {
+      p1 = t.p2; p2 = t.p3;
+    } else {
+      p1 = t.p3; p2 = t.p1;
+    }
+
+    const sp1 = worldToStage(p1.x, p1.y);
+    const sp2 = worldToStage(p2.x, p2.y);
+
+    return (
+      <Group key="selected-edge-highlight">
+        {/* Outer glow */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#fde047"
+          strokeWidth={12}
+          lineCap="round"
+          opacity={0.6}
+        />
+        {/* Inner highlight */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#facc15"
+          strokeWidth={6}
+          lineCap="round"
+        />
+      </Group>
+    );
+  };
+
+  // Render standalone edges
+  const renderStandaloneEdge = (edge: StandaloneEdge) => {
+    const sp1 = worldToStage(edge.p1.x, edge.p1.y);
+    const sp2 = worldToStage(edge.p2.x, edge.p2.y);
+    const midX = (sp1.x + sp2.x) / 2;
+    const midY = (sp1.y + sp2.y) / 2;
+
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const lenText = edge.length.toFixed(2);
+    const charWidth = fontSize * 0.6;
+    const textWidth = lenText.length * charWidth;
+    const endpointRadius = Math.max(4, fontSize * 0.4);
+
+    const isLongPressing = longPressTarget?.type === 'edge' && longPressTarget?.id === edge.id;
+
+    return (
+      <Group key={`standalone-${edge.id}`}>
+        {/* Hit area for double-click on edge body (to create triangle) and long press to delete */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="transparent"
+          strokeWidth={20}
+          onMouseDown={(e) => {
+            if (e.evt.button === 0) {
+              startLongPress('edge', edge.id);
+            }
+          }}
+          onMouseUp={() => {
+            cancelLongPress();
+          }}
+          onMouseLeave={() => {
+            cancelLongPress();
+          }}
+          onDblClick={(e) => {
+            cancelLongPress();
+            e.evt.stopPropagation();
+            // Enter triangle placing mode from this edge
+            setInteraction({
+              type: 'STANDALONE_EDGE_PLACING',
+              edgeId: edge.id,
+              p1: edge.p1,
+              p2: edge.p2,
+              currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
+            });
+          }}
+        />
+        {/* Visible edge */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={isLongPressing ? "#ef4444" : "#3b82f6"}
+          strokeWidth={isLongPressing ? 3 : 2}
+          opacity={isLongPressing ? (0.5 + longPressTarget!.progress * 0.5) : 1}
+        />
+        {/* Endpoint 1 - double-click to extend */}
+        <Circle
+          x={sp1.x}
+          y={sp1.y}
+          radius={endpointRadius}
+          fill="#3b82f6"
+          stroke="white"
+          strokeWidth={2}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p1,
+              currentMouse: edge.p1
+            });
+          }}
+        />
+        {/* Endpoint 2 - double-click to extend */}
+        <Circle
+          x={sp2.x}
+          y={sp2.y}
+          radius={endpointRadius}
+          fill="#3b82f6"
+          stroke="white"
+          strokeWidth={2}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p2,
+              currentMouse: edge.p2
+            });
+          }}
+        />
+        {/* Length label - clickable to edit */}
+        {editingEdgeDim?.edgeId !== edge.id && (
+          <Text
+            x={midX}
+            y={midY}
+            text={lenText}
+            fontSize={fontSize}
+            fontFamily="monospace"
+            fontStyle="bold"
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={3}
+            offsetX={textWidth / 2}
+            offsetY={fontSize / 2 + fontSize}
+            onClick={() => handleEdgeLabelClick(edge.id, edge.length, midX, midY - fontSize, fontSize)}
+          />
         )}
       </Group>
     );
   };
 
-  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, and VERTEX_RESHAPING)
+  // Render edge drawing ghost (for both new edge and extending edge)
+  const renderEdgeDrawingGhost = () => {
+    let startPoint: Point, currentMouse: Point;
+
+    if (interaction.type === 'DRAWING_EDGE') {
+      startPoint = interaction.startPoint;
+      currentMouse = interaction.currentMouse;
+    } else if (interaction.type === 'EXTENDING_EDGE') {
+      startPoint = interaction.fromPoint;
+      currentMouse = interaction.currentMouse;
+    } else {
+      return null;
+    }
+
+    // Apply snap for visual feedback
+    const snappedMouse = applySnap(currentMouse, [startPoint]);
+    const isSnapping = snappedMouse !== currentMouse;
+
+    const sp1 = worldToStage(startPoint.x, startPoint.y);
+    const sp2 = worldToStage(snappedMouse.x, snappedMouse.y);
+    const len = distance(startPoint, snappedMouse).toFixed(2);
+
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const charWidth = fontSize * 0.6;
+    const textWidth = len.length * charWidth;
+    const snapRadius = Math.max(6, fontSize * 0.5);
+
+    return (
+      <Group>
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#3b82f6"
+          strokeWidth={2}
+          dash={[4, 4]}
+        />
+        {/* Snap indicator */}
+        {isSnapping && (
+          <Circle
+            x={sp2.x}
+            y={sp2.y}
+            radius={snapRadius}
+            fill="transparent"
+            stroke="#22c55e"
+            strokeWidth={2}
+          />
+        )}
+        <Text
+          x={(sp1.x + sp2.x) / 2}
+          y={(sp1.y + sp2.y) / 2}
+          text={len}
+          fontSize={fontSize}
+          fill="#3b82f6"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={textWidth / 2}
+          offsetY={fontSize / 2}
+        />
+      </Group>
+    );
+  };
+
+  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, VERTEX_RESHAPING, STANDALONE_EDGE_PLACING)
   const renderDragGhost = () => {
-    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING') return null;
+    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING' && interaction.type !== 'STANDALONE_EDGE_PLACING') return null;
     const { p1, p2, currentMouse } = interaction;
+
+    // Apply snap for visual feedback (exclude base edge points)
+    const snappedMouse = applySnap(currentMouse, [p1, p2]);
+    const isSnapping = snappedMouse !== currentMouse;
 
     const sp1 = worldToStage(p1.x, p1.y);
     const sp2 = worldToStage(p2.x, p2.y);
-    const sp3 = worldToStage(currentMouse.x, currentMouse.y);
+    const sp3 = worldToStage(snappedMouse.x, snappedMouse.y);
 
-    const sL = distance(p1, currentMouse).toFixed(2);
-    const sR = distance(p2, currentMouse).toFixed(2);
+    const sL = distance(p1, snappedMouse).toFixed(2);
+    const sR = distance(p2, snappedMouse).toFixed(2);
 
     // Calculate font size based on world-to-screen scale
     const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
+    const snapRadius = Math.max(6, fontSize * 0.5);
 
     // Estimate text width (monospace: ~0.6 * fontSize per character)
     const charWidth = fontSize * 0.6;
@@ -666,6 +1126,18 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         />
         <Line points={[sp1.x, sp1.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
         <Line points={[sp2.x, sp2.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
+
+        {/* Snap indicator */}
+        {isSnapping && (
+          <Circle
+            x={sp3.x}
+            y={sp3.y}
+            radius={snapRadius}
+            fill="transparent"
+            stroke="#22c55e"
+            strokeWidth={2}
+          />
+        )}
 
         <Text
           x={(sp1.x + sp3.x) / 2}
@@ -718,12 +1190,15 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       >
         <Layer>
           {renderGrid()}
+          {/* Render standalone edges */}
+          {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
           {/* Render all triangle fills first (bottom layer) */}
           {triangles.map((t) => renderTriangleFill(t, false))}
-          {phantomTriangle && renderTriangleFill(phantomTriangle, true)}
+          {/* Render selected edge highlight (above fills, below labels) */}
+          {renderSelectedEdgeHighlight()}
           {/* Render all labels on top (so they're clickable) */}
           {triangles.map((t) => renderTriangleLabels(t, false))}
-          {phantomTriangle && renderTriangleLabels(phantomTriangle, true)}
+          {renderEdgeDrawingGhost()}
           {renderDragGhost()}
         </Layer>
       </Stage>
@@ -757,7 +1232,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         <p>• Scroll: Zoom / Drag BG: Pan</p>
       </div>
 
-      {/* HTML Input overlay for editing dimensions */}
+      {/* HTML Input overlay for editing triangle dimensions */}
       {editingDim && editingInputPos && (
         <div
           style={{
@@ -818,6 +1293,150 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               borderRadius: '2px'
             }}
           />
+        </div>
+      )}
+
+      {/* HTML Input overlay for editing standalone edge dimensions */}
+      {editingEdgeDim && editingInputPos && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `${editingInputPos.x}px`,
+            top: `${editingInputPos.y}px`,
+            transform: 'translate(-50%, -50%)',
+            fontSize: `${editingInputPos.fontSize}px`,
+            fontFamily: 'ui-monospace, monospace',
+            fontWeight: '600',
+            zIndex: 1000
+          }}
+        >
+          <input
+            type="text"
+            inputMode="decimal"
+            value={editingEdgeDim.value}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
+                setEditingEdgeDim({...editingEdgeDim, value: value});
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditingEdgeDim(null);
+                setEditingInputPos(null);
+              }
+            }}
+            onBlur={commitEdit}
+            autoFocus
+            style={{
+              fontSize: 'inherit',
+              fontFamily: 'inherit',
+              fontWeight: 'inherit',
+              textAlign: 'center',
+              border: 'none',
+              outline: 'none',
+              background: 'rgba(255,255,255,0.9)',
+              color: '#3b82f6',
+              padding: '0 0.2em',
+              margin: '0',
+              cursor: 'text',
+              width: 'auto',
+              minWidth: '3em',
+              borderRadius: '2px'
+            }}
+          />
+        </div>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirm && (
+        <div
+          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
+          onClick={() => setDeleteConfirm(null)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4 border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center">
+                <span className="text-slate-600 text-xl">🗑</span>
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Delete {deleteConfirm.name}?</h3>
+                <p className="text-sm text-slate-500">This action cannot be undone</p>
+              </div>
+            </div>
+
+            {deleteConfirm.type === 'triangle' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3 mb-4">
+                <p className="text-sm text-amber-700">
+                  <strong>Note:</strong> All triangles connected to {deleteConfirm.name} will also be deleted.
+                </p>
+              </div>
+            )}
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Type <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">del</span> to confirm:
+              </label>
+              <input
+                type="text"
+                value={deleteInput}
+                onChange={(e) => setDeleteInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && deleteInput.toLowerCase() === 'del') {
+                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
+                      onDeleteTriangle(deleteConfirm.id);
+                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
+                      onDeleteStandaloneEdge(deleteConfirm.id);
+                    }
+                    setDeleteConfirm(null);
+                    setDeleteInput('');
+                  } else if (e.key === 'Escape') {
+                    setDeleteConfirm(null);
+                  }
+                }}
+                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
+                placeholder="del"
+                autoFocus
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 px-4 py-2 bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200 transition-colors font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (deleteInput.toLowerCase() === 'del') {
+                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
+                      onDeleteTriangle(deleteConfirm.id);
+                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
+                      onDeleteStandaloneEdge(deleteConfirm.id);
+                    }
+                    setDeleteConfirm(null);
+                    setDeleteInput('');
+                  }
+                }}
+                disabled={deleteInput.toLowerCase() !== 'del'}
+                className={`flex-1 px-4 py-2 rounded-md font-medium transition-colors ${
+                  deleteInput.toLowerCase() === 'del'
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                }`}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
