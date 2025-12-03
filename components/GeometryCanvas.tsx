@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
 import Konva from 'konva';
 import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
-import { getCentroid, distance, generateId } from '../utils/geometryUtils';
+import { getCentroid, distance, generateId, calculateThirdPoint } from '../utils/geometryUtils';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 
 interface GeometryCanvasProps {
@@ -24,6 +24,10 @@ interface GeometryCanvasProps {
   onDeleteTriangle?: (id: string) => void;
   onDeleteStandaloneEdge?: (id: string) => void;
   onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
+  // Root triangle placement mode
+  rootPlacingMode?: { sideA: number; sideB: number; sideC: number } | null;
+  onRootPlacingComplete?: (origin: Point, angle: number) => void;
+  onRootPlacingCancel?: () => void;
 }
 
 type InteractionState =
@@ -36,7 +40,9 @@ type InteractionState =
   | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'DRAWING_EDGE'; startPoint: Point; currentMouse: Point }
   | { type: 'STANDALONE_EDGE_PLACING'; edgeId: string; p1: Point; p2: Point; currentMouse: Point }
-  | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point };
+  | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point }
+  | { type: 'ROOT_PLACING_ORIGIN'; sideA: number; sideB: number; sideC: number; currentMouse: Point }
+  | { type: 'ROOT_PLACING_ANGLE'; sideA: number; sideB: number; sideC: number; origin: Point; currentMouse: Point };
 
 // Long press duration in milliseconds
 const LONG_PRESS_DURATION = 600;
@@ -59,7 +65,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   onAddTriangleFromEdge,
   onDeleteTriangle,
   onDeleteStandaloneEdge,
-  onUpdateStandaloneEdgeLength
+  onUpdateStandaloneEdgeLength,
+  rootPlacingMode,
+  onRootPlacingComplete,
+  onRootPlacingCancel
 }) => {
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -192,6 +201,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     };
   }, []);
 
+  // Enter root placing mode when rootPlacingMode is set
+  useEffect(() => {
+    if (rootPlacingMode) {
+      setInteraction({
+        type: 'ROOT_PLACING_ORIGIN',
+        sideA: rootPlacingMode.sideA,
+        sideB: rootPlacingMode.sideB,
+        sideC: rootPlacingMode.sideC,
+        currentMouse: { id: generateId(), x: 0, y: 0 }
+      });
+    } else {
+      // Cancel placing mode if rootPlacingMode becomes null
+      if (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE') {
+        setInteraction({ type: 'IDLE' });
+      }
+    }
+  }, [rootPlacingMode]);
+
   // Convert world coordinates to stage coordinates
   const worldToStage = useCallback((worldX: number, worldY: number): { x: number; y: number } => {
     const normalizedX = (worldX - worldBounds.x) / worldBounds.w;
@@ -254,6 +281,33 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.evt.button === 0 && !editingDim) {
+      // If in root placing origin mode, set the origin
+      if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+        const origin = getWorldPoint(e);
+        const snappedOrigin = applySnap(origin, []);
+        setInteraction({
+          type: 'ROOT_PLACING_ANGLE',
+          sideA: interaction.sideA,
+          sideB: interaction.sideB,
+          sideC: interaction.sideC,
+          origin: snappedOrigin,
+          currentMouse: snappedOrigin
+        });
+        return;
+      }
+      // If in root placing angle mode, complete the placement
+      if (interaction.type === 'ROOT_PLACING_ANGLE') {
+        const { origin, currentMouse, sideA } = interaction;
+        // Calculate angle from origin to currentMouse
+        const dx = currentMouse.x - origin.x;
+        const dy = currentMouse.y - origin.y;
+        const angle = Math.atan2(dy, dx);
+        if (onRootPlacingComplete) {
+          onRootPlacingComplete(origin, angle);
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
       // If in phantom placing mode, confirm the triangle on click
       if (interaction.type === 'PHANTOM_PLACING') {
         if (onAddAttachedTriangle) {
@@ -400,10 +454,27 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     } else if (interaction.type === 'EXTENDING_EDGE') {
       const currentMouse = getWorldPoint(e);
       setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'ROOT_PLACING_ANGLE') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
     }
   };
 
   const handleMouseUp = () => {
+    // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
+    if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
+        interaction.type === 'ROOT_PLACING_ANGLE' ||
+        interaction.type === 'PHANTOM_PLACING' ||
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
+        interaction.type === 'EXTENDING_EDGE') {
+      return;
+    }
+
     if (interaction.type === 'EDGE_READY') {
       // Single click on edge - select the edge only (no triangle creation)
       onEdgeSelect(interaction.tId, interaction.index);
@@ -669,9 +740,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             onClick={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
-              if (!isOccupied) {
-                onEdgeSelect(t.id, index);
-              }
+              // Allow edge selection even if occupied (for highlight)
+              onEdgeSelect(t.id, index);
             }}
             onMouseDown={(e) => {
               e.evt.stopPropagation();
@@ -1167,8 +1237,174 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
-  const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING' 
-    ? 'grabbing' 
+  // Render root triangle placement preview
+  const renderRootPlacingPreview = () => {
+    if (interaction.type !== 'ROOT_PLACING_ORIGIN' && interaction.type !== 'ROOT_PLACING_ANGLE') return null;
+
+    const { sideA, sideB, sideC, currentMouse } = interaction;
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const snapRadius = Math.max(6, fontSize * 0.5);
+
+    // In ORIGIN mode, just show cursor indicator
+    if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+      const snappedMouse = applySnap(currentMouse, []);
+      const isSnapping = snappedMouse !== currentMouse;
+      const sp = worldToStage(snappedMouse.x, snappedMouse.y);
+
+      return (
+        <Group>
+          {/* Origin cursor indicator */}
+          <Circle
+            x={sp.x}
+            y={sp.y}
+            radius={snapRadius * 1.5}
+            fill="#3b82f6"
+            opacity={0.5}
+          />
+          {isSnapping && (
+            <Circle
+              x={sp.x}
+              y={sp.y}
+              radius={snapRadius * 2}
+              fill="transparent"
+              stroke="#22c55e"
+              strokeWidth={2}
+            />
+          )}
+          <Text
+            x={sp.x}
+            y={sp.y + snapRadius * 3}
+            text="Click to set origin"
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 5}
+          />
+        </Group>
+      );
+    }
+
+    // In ANGLE mode, show triangle preview
+    if (interaction.type === 'ROOT_PLACING_ANGLE') {
+      const { origin } = interaction;
+
+      // Calculate p2 position based on currentMouse direction
+      const dx = currentMouse.x - origin.x;
+      const dy = currentMouse.y - origin.y;
+      const angle = Math.atan2(dy, dx);
+
+      // p2 is at distance sideA from origin in the direction of angle
+      const p1 = origin;
+      const p2: Point = {
+        id: 'p2',
+        x: origin.x + sideA * Math.cos(angle),
+        y: origin.y + sideA * Math.sin(angle)
+      };
+
+      // Use the SAME function as recalculateGeometry
+      // recalculateGeometry calls: calculateThirdPoint(p1, p2, sb, sc, !def.flip)
+      // def.flip defaults to false/undefined, so !def.flip = true
+      const p3 = calculateThirdPoint(p1, p2, sideB, sideC, true);
+
+      if (!p3) {
+        return null;
+      }
+
+      const sp1 = worldToStage(p1.x, p1.y);
+      const sp2 = worldToStage(p2.x, p2.y);
+      const sp3 = worldToStage(p3.x, p3.y);
+
+      // Also show angle line from origin to current mouse
+      const smouse = worldToStage(currentMouse.x, currentMouse.y);
+
+      return (
+        <Group>
+          {/* Direction line (faint) */}
+          <Line
+            points={[sp1.x, sp1.y, smouse.x, smouse.y]}
+            stroke="#3b82f6"
+            strokeWidth={1}
+            dash={[4, 4]}
+            opacity={0.5}
+          />
+          {/* Triangle preview */}
+          <Shape
+            sceneFunc={(context, shape) => {
+              context.beginPath();
+              context.moveTo(sp1.x, sp1.y);
+              context.lineTo(sp2.x, sp2.y);
+              context.lineTo(sp3.x, sp3.y);
+              context.closePath();
+              context.fillStrokeShape(shape);
+            }}
+            fill="#3b82f6"
+            opacity={0.2}
+            stroke="#3b82f6"
+            strokeWidth={2}
+          />
+          {/* Side labels */}
+          <Text
+            x={(sp1.x + sp2.x) / 2}
+            y={(sp1.y + sp2.y) / 2}
+            text={`A: ${sideA}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={fontSize}
+          />
+          <Text
+            x={(sp1.x + sp3.x) / 2}
+            y={(sp1.y + sp3.y) / 2}
+            text={`B: ${sideB}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={-fontSize * 0.5}
+          />
+          <Text
+            x={(sp2.x + sp3.x) / 2}
+            y={(sp2.y + sp3.y) / 2}
+            text={`C: ${sideC}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={-fontSize * 0.5}
+          />
+          {/* Instruction */}
+          <Text
+            x={sp1.x}
+            y={sp1.y + snapRadius * 4}
+            text="Click to place triangle"
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 5.5}
+          />
+        </Group>
+      );
+    }
+
+    return null;
+  };
+
+  const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING'
+    ? 'grabbing'
+    : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE')
+    ? 'crosshair'
     : 'default';
 
   return (
@@ -1200,6 +1436,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           {triangles.map((t) => renderTriangleLabels(t, false))}
           {renderEdgeDrawingGhost()}
           {renderDragGhost()}
+          {renderRootPlacingPreview()}
         </Layer>
       </Stage>
 
@@ -1226,10 +1463,12 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       </div>
 
       <div className="absolute bottom-4 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
-        <p className="font-semibold">Controls:</p>
-        <p>• Click Label: <span className="text-blue-600 font-bold">Edit Dimension</span></p>
-        <p>• Drag Edge: <span className="text-emerald-600 font-bold">Add New Triangle</span></p>
-        <p>• Scroll: Zoom / Drag BG: Pan</p>
+        <p className="font-semibold mb-1">操作方法:</p>
+        <p>• <span className="text-blue-600 font-bold">辺ダブルクリック</span>: 三角形を追加</p>
+        <p>• <span className="text-blue-600 font-bold">寸法クリック</span>: 数値を編集</p>
+        <p>• <span className="text-amber-600 font-bold">番号ダブルクリック</span>: 頂点を移動</p>
+        <p>• <span className="text-slate-600 font-bold">長押し</span>: 削除</p>
+        <p>• スクロール: ズーム / ドラッグ: パン</p>
       </div>
 
       {/* HTML Input overlay for editing triangle dimensions */}

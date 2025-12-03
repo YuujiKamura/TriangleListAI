@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { TriangleDef } from '../types';
 
 interface InputPanelProps {
   mode: 'ROOT' | 'ATTACH' | 'EDIT_ROOT' | 'EDIT_ATTACHED';
@@ -7,20 +6,27 @@ interface InputPanelProps {
   parentTriangleName?: string;
   onSubmit: (values: any) => void;
   onCancel?: () => void;
-  onValuesChange?: (values: any) => void;
 }
 
-const InputPanel: React.FC<InputPanelProps> = ({ 
-  mode, 
-  parentTriangleName, 
-  initialValues, 
-  onSubmit, 
-  onCancel,
-  onValuesChange 
+const InputPanel: React.FC<InputPanelProps> = ({
+  mode,
+  parentTriangleName,
+  initialValues,
+  onSubmit,
+  onCancel
 }) => {
-  const [values, setValues] = useState({ s1: '', s2: '', s3: '' });
+  const [values, setValues] = useState(() => {
+    if (initialValues) {
+      return {
+        s1: initialValues.s1?.toString() || '',
+        s2: initialValues.s2?.toString() || '',
+        s3: initialValues.s3?.toString() || ''
+      };
+    }
+    return { s1: '', s2: '', s3: '' };
+  });
 
-  // Reset or set values when mode or initialValues change
+  // Reset values when mode or initialValues change (for when key doesn't change)
   useEffect(() => {
     if (initialValues) {
         const newValues = {
@@ -29,21 +35,14 @@ const InputPanel: React.FC<InputPanelProps> = ({
             s3: initialValues.s3?.toString() || ''
         };
         setValues(newValues);
-        // Sync parent state immediately when loading existing values
-        if(onValuesChange) onValuesChange(newValues);
     } else {
-        const defaults = { s1: '', s2: '', s3: '' };
-        setValues(defaults);
-        if(onValuesChange) onValuesChange(defaults);
+        setValues({ s1: '', s2: '', s3: '' });
     }
-  }, [mode, parentTriangleName, initialValues]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, parentTriangleName, initialValues]);
 
   const handleChange = (field: string, val: string) => {
     const newValues = { ...values, [field]: val };
     setValues(newValues);
-    if (onValuesChange) {
-        onValuesChange(newValues);
-    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {

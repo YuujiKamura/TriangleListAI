@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { RenderedTriangle, TriangleDef, AIAnalysisResult, ToolMode, StandaloneEdge, Point } from './types';
 import { generateId, recalculateGeometry, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
 import { PALETTE } from './constants';
@@ -41,8 +41,6 @@ const App: React.FC = () => {
   const [selectedEdge, setSelectedEdge] = useState<{ triangleId: string, edgeIndex: 0 | 1 | 2 } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   
-  // Keep track of current inputs to render phantom triangle in real-time
-  const [currentInputValues, setCurrentInputValues] = useState({ s1: '', s2: '', s3: '' });
   
   // AI State
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisResult>({ text: "", loading: false });
@@ -53,6 +51,55 @@ const App: React.FC = () => {
 
   // Standalone edges (for starting without triangles)
   const [standaloneEdges, setStandaloneEdges] = useState<StandaloneEdge[]>([]);
+
+  // Root triangle placement mode
+  const [rootPlacingMode, setRootPlacingMode] = useState<{ sideA: number; sideB: number; sideC: number } | null>(null);
+
+  // Undo history
+  const [history, setHistory] = useState<{ defs: TriangleDef[], edges: StandaloneEdge[] }[]>([]);
+  const isUndoing = useRef(false);
+  const MAX_HISTORY = 50;
+
+  // Save current state to history before making changes
+  const saveToHistory = useCallback(() => {
+    if (isUndoing.current) return;
+    setHistory(prev => {
+      const newHistory = [...prev, { defs: JSON.parse(JSON.stringify(defs)), edges: JSON.parse(JSON.stringify(standaloneEdges)) }];
+      // Limit history size
+      if (newHistory.length > MAX_HISTORY) {
+        return newHistory.slice(-MAX_HISTORY);
+      }
+      return newHistory;
+    });
+  }, [defs, standaloneEdges]);
+
+  // Undo function
+  const handleUndo = useCallback(() => {
+    if (history.length === 0) return;
+
+    isUndoing.current = true;
+    const prevState = history[history.length - 1];
+    setDefs(prevState.defs);
+    setStandaloneEdges(prevState.edges);
+    setHistory(prev => prev.slice(0, -1));
+
+    // Reset undo flag after state updates
+    setTimeout(() => {
+      isUndoing.current = false;
+    }, 0);
+  }, [history]);
+
+  // Keyboard shortcut for Undo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo]);
 
   // Check if two line segments overlap (share the same line and have overlapping ranges)
   const edgesOverlap = (edge: StandaloneEdge, p1: Point, p2: Point, tolerance: number = 0.1): boolean => {
@@ -150,19 +197,52 @@ const App: React.FC = () => {
     const sB = parseFloat(values.s2);
     const sC = parseFloat(values.s3);
 
-    if (isNaN(sA) || isNaN(sB) || isNaN(sC)) return;
+    if (isNaN(sA) || isNaN(sB) || isNaN(sC)) {
+      return;
+    }
+
+    // Validate triangle inequality
+    if (!isValidRootTriangle(sA, sB, sC)) {
+      alert('三角形として成立しません。任意の2辺の和が残りの1辺より大きい必要があります。');
+      return;
+    }
+
+    // Enter canvas placement mode
+    setRootPlacingMode({ sideA: sA, sideB: sB, sideC: sC });
+  };
+
+  // Handle completion of root triangle placement on canvas
+  const handleRootPlacingComplete = (origin: Point, angle: number) => {
+    if (!rootPlacingMode) return;
+
+    const { sideA, sideB, sideC } = rootPlacingMode;
+
+    // Calculate p2 position based on origin and angle
+    const p2: Point = {
+      id: 'p2',
+      x: origin.x + sideA * Math.cos(angle),
+      y: origin.y + sideA * Math.sin(angle)
+    };
 
     const newDef: TriangleDef = {
       id: generateId(),
       name: `T${defs.length + 1}`,
       color: PALETTE[defs.length % PALETTE.length],
       isRoot: true,
-      sideA: sA,
-      sideB: sB,
-      sideC: sC
+      sideA: sideA,
+      sideB: sideB,
+      sideC: sideC,
+      originP1: origin,
+      originP2: p2
     };
 
+    saveToHistory();
     setDefs([...defs, newDef]);
+    setRootPlacingMode(null);
+  };
+
+  const handleRootPlacingCancel = () => {
+    setRootPlacingMode(null);
   };
 
   const handleAddAttachedTriangle = (values: { s1: string, s2: string }) => {
@@ -185,6 +265,7 @@ const App: React.FC = () => {
       flip: false // Default direction
     };
 
+    saveToHistory();
     setDefs([...defs, newDef]);
     setSelectedEdge(null); // Clear selection after add
   };
@@ -193,6 +274,25 @@ const App: React.FC = () => {
     // Validate that both sides are positive and valid
     if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
       return; // Don't add invalid triangle
+    }
+
+    // Get the parent triangle to find the reference edge length
+    const parentTriangle = geometry.triangles.find(t => t.id === triangleId);
+    if (!parentTriangle) return;
+
+    let refEdge = 0;
+    if (edgeIndex === 0) {
+      refEdge = distance(parentTriangle.p1, parentTriangle.p2);
+    } else if (edgeIndex === 1) {
+      refEdge = distance(parentTriangle.p2, parentTriangle.p3);
+    } else {
+      refEdge = distance(parentTriangle.p3, parentTriangle.p1);
+    }
+
+    // Validate triangle inequality
+    if (!isValidAttachedTriangle(refEdge, sideLeft, sideRight)) {
+      alert('三角形として成立しません。\n2辺の和が参照辺より大きい必要があります。');
+      return;
     }
 
     const newDef: TriangleDef = {
@@ -206,6 +306,7 @@ const App: React.FC = () => {
       sideRight: parseFloat(sideRight.toFixed(2)),
       flip: flip
     };
+    saveToHistory();
     setDefs([...defs, newDef]);
     setSelectedEdge(null); // Clear selection after adding
   };
@@ -216,6 +317,7 @@ const App: React.FC = () => {
       return;
     }
 
+    saveToHistory();
     setDefs(defs.map(d => {
       if (d.id !== triangleId) return d;
 
@@ -249,6 +351,7 @@ const App: React.FC = () => {
       p2,
       length: parseFloat(len.toFixed(2))
     };
+    saveToHistory();
     setStandaloneEdges(prev => [...prev, newEdge]); // Allow multiple edges
   };
 
@@ -271,6 +374,7 @@ const App: React.FC = () => {
       flip: !flip // Invert because geometryUtils uses !flip for root
     };
 
+    saveToHistory();
     setDefs(prev => [...prev, newDef]);
     // Remove only this edge, keep others
     setStandaloneEdges(prev => prev.filter(e => e.id !== edgeId));
@@ -285,6 +389,7 @@ const App: React.FC = () => {
   const handleUpdateTriangle = (values: any) => {
     if (!editingId) return;
 
+    saveToHistory();
     setDefs(defs.map(d => {
       if (d.id !== editingId) return d;
       
@@ -361,6 +466,7 @@ const App: React.FC = () => {
     }
 
     // Update if validation passed
+    saveToHistory();
     setDefs(prevDefs => prevDefs.map(d => {
       if (d.id !== triangleId) return d;
 
@@ -390,6 +496,7 @@ const App: React.FC = () => {
 
   const handleDelete = (id: string) => {
     if(window.confirm("Delete this triangle? Attached triangles may disappear.")) {
+        saveToHistory();
         const filtered = defs.filter(d => d.id !== id && d.attachedToTriangleId !== id);
         setDefs(renumberTriangles(filtered));
         if (selectedTriangleId === id) setSelectedTriangleId(null);
@@ -397,8 +504,9 @@ const App: React.FC = () => {
     }
   };
 
-  // Delete triangle via long press (no confirmation needed)
+  // Delete triangle via long press (with confirmation dialog)
   const handleDeleteTriangle = (id: string) => {
+    saveToHistory();
     const filtered = defs.filter(d => d.id !== id && d.attachedToTriangleId !== id);
     setDefs(renumberTriangles(filtered));
     if (selectedTriangleId === id) setSelectedTriangleId(null);
@@ -407,6 +515,7 @@ const App: React.FC = () => {
 
   // Delete standalone edge via long press
   const handleDeleteStandaloneEdge = (id: string) => {
+    saveToHistory();
     setStandaloneEdges(prev => prev.filter(e => e.id !== id));
   };
 
@@ -414,6 +523,7 @@ const App: React.FC = () => {
   const handleUpdateStandaloneEdgeLength = (id: string, newLength: number) => {
     if (newLength <= 0) return;
 
+    saveToHistory();
     setStandaloneEdges(prev => prev.map(edge => {
       if (edge.id !== id) return edge;
 
@@ -441,7 +551,9 @@ const App: React.FC = () => {
 
   const handleClear = () => {
     if (window.confirm("Clear all geometry?")) {
+      saveToHistory();
       setDefs([]);
+      setStandaloneEdges([]);
       setSelectedTriangleId(null);
       setSelectedEdge(null);
       setEditingId(null);
@@ -480,37 +592,6 @@ const App: React.FC = () => {
 
   const totalArea = geometry.triangles.reduce((acc, t) => acc + t.area, 0);
 
-  // Determine Input Panel Props
-  let inputMode: 'ROOT' | 'ATTACH' | 'EDIT_ROOT' | 'EDIT_ATTACHED' | null = null;
-  let inputInitialValues = undefined;
-  let inputSubmit = undefined;
-  let inputCancel = undefined;
-
-  const editingDef = editingId ? defs.find(d => d.id === editingId) : null;
-
-  if (editingDef) {
-    inputMode = editingDef.isRoot ? 'EDIT_ROOT' : 'EDIT_ATTACHED';
-    inputInitialValues = editingDef.isRoot 
-        ? { s1: editingDef.sideA, s2: editingDef.sideB, s3: editingDef.sideC }
-        : { s1: editingDef.sideLeft, s2: editingDef.sideRight };
-    inputSubmit = handleUpdateTriangle;
-    inputCancel = () => setEditingId(null);
-  } else if (defs.length === 0) {
-    inputMode = 'ROOT';
-    inputInitialValues = { s1: 5, s2: 5, s3: 5 }; // Default suggestions
-    inputSubmit = handleAddRootTriangle;
-  } else if (selectedEdge) {
-    inputMode = 'ATTACH';
-    // Suggestions for new triangle (User can type over these)
-    inputInitialValues = { s1: 5, s2: 5 }; 
-    inputSubmit = handleAddAttachedTriangle;
-    inputCancel = () => setSelectedEdge(null);
-  }
-
-  const parentTriangleName = selectedEdge 
-    ? geometry.triangles.find(t => t.id === selectedEdge.triangleId)?.name 
-    : '';
-
   // Calculate which edges are already occupied (have a child triangle attached)
   // Format: "triangleId-edgeIndex"
   // We need to mark BOTH the parent's edge AND the child's Ref edge (index 0) as occupied
@@ -528,6 +609,42 @@ const App: React.FC = () => {
     });
     return occupied;
   }, [defs]);
+
+  // Determine Input Panel Props
+  let inputMode: 'ROOT' | 'ATTACH' | 'EDIT_ROOT' | 'EDIT_ATTACHED' | null = null;
+  let inputInitialValues = undefined;
+  let inputSubmit = undefined;
+  let inputCancel = undefined;
+
+  const editingDef = editingId ? defs.find(d => d.id === editingId) : null;
+
+  if (editingDef) {
+    inputMode = editingDef.isRoot ? 'EDIT_ROOT' : 'EDIT_ATTACHED';
+    inputInitialValues = editingDef.isRoot
+        ? { s1: editingDef.sideA, s2: editingDef.sideB, s3: editingDef.sideC }
+        : { s1: editingDef.sideLeft, s2: editingDef.sideRight };
+    inputSubmit = handleUpdateTriangle;
+    inputCancel = () => setEditingId(null);
+  } else if (selectedEdge) {
+    // Only show ATTACH panel if the edge is not occupied
+    const isEdgeOccupied = occupiedEdges.has(`${selectedEdge.triangleId}-${selectedEdge.edgeIndex}`);
+    if (!isEdgeOccupied) {
+      inputMode = 'ATTACH';
+      // Suggestions for new triangle (User can type over these)
+      inputInitialValues = { s1: 5, s2: 5 };
+      inputSubmit = handleAddAttachedTriangle;
+      inputCancel = () => setSelectedEdge(null);
+    }
+  } else {
+    // Default: show ROOT panel to add new base triangle
+    inputMode = 'ROOT';
+    inputInitialValues = { s1: 5, s2: 5, s3: 5 }; // Default suggestions
+    inputSubmit = handleAddRootTriangle;
+  }
+
+  const parentTriangleName = selectedEdge
+    ? geometry.triangles.find(t => t.id === selectedEdge.triangleId)?.name
+    : '';
 
   return (
     <div className="flex flex-col h-screen bg-slate-50">
@@ -593,12 +710,25 @@ const App: React.FC = () => {
             onDeleteTriangle={handleDeleteTriangle}
             onDeleteStandaloneEdge={handleDeleteStandaloneEdge}
             onUpdateStandaloneEdgeLength={handleUpdateStandaloneEdgeLength}
+            rootPlacingMode={rootPlacingMode}
+            onRootPlacingComplete={handleRootPlacingComplete}
+            onRootPlacingCancel={handleRootPlacingCancel}
           />
 
           {/* Prompt Overlay */}
-          {!inputMode && (
-             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur px-4 py-2 rounded-full shadow-lg border border-blue-100 text-sm text-blue-800 animate-in fade-in slide-in-from-top-4 pointer-events-none">
-                👆 Drag an edge to add a triangle or click a dimension to edit
+          {rootPlacingMode ? (
+             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-500/90 backdrop-blur px-4 py-2 rounded-lg shadow-lg border border-blue-300 text-sm text-white flex items-center gap-3">
+                <span><span className="font-bold">1. 起点をクリック</span> → <span className="font-bold">2. 角度を決めてクリック</span></span>
+                <button
+                  onClick={handleRootPlacingCancel}
+                  className="px-2 py-1 bg-white/20 hover:bg-white/30 rounded text-xs font-medium"
+                >
+                  キャンセル
+                </button>
+             </div>
+          ) : !inputMode && (
+             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow-lg border border-blue-100 text-sm text-blue-800 pointer-events-none">
+                <span className="font-medium">ダブルクリック</span>で三角形追加 / <span className="font-medium">クリック</span>で寸法編集
              </div>
           )}
         </div>
@@ -608,15 +738,14 @@ const App: React.FC = () => {
           {sidebarOpen && (
             <>
               {/* Input Area (Dynamic) */}
-              {inputMode ? (
+              {inputMode && inputSubmit ? (
                   <InputPanel
-                    key={inputMode + (editingId || selectedEdge?.triangleId || selectedEdge?.edgeIndex || 'root')}
+                    key={inputMode + (editingId || selectedEdge?.triangleId || '') + (selectedEdge?.edgeIndex ?? '') + 'panel'}
                     mode={inputMode}
                     parentTriangleName={parentTriangleName}
                     initialValues={inputInitialValues}
                     onSubmit={inputSubmit}
                     onCancel={inputCancel}
-                    onValuesChange={setCurrentInputValues}
                   />
               ) : (
                  <div className="p-6 text-center text-slate-400 bg-slate-50 border-b border-slate-100">

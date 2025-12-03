@@ -78,11 +78,12 @@ export const calculateAttachedTriangle = (
         const area = calculateHeronArea(baseLen, def.sideLeft, def.sideRight);
 
         // edgeLabels: [p1-p2, p2-p3, p3-p1]
-        // sideLeft = p1-p3 = B, sideRight = p2-p3 = C
-        // When flipped, the visual positions swap, so labels should swap too
-        const edgeLabels: [string, string, string] = def.flip
-            ? ['Ref', 'B', 'C']  // flipped: p2-p3=B, p3-p1=C
-            : ['Ref', 'C', 'B']; // normal: p2-p3=C, p3-p1=B
+        // sideLeft = baseP1-pNew distance (L parameter in calculateThirdPoint)
+        // sideRight = baseP2-pNew distance (R parameter in calculateThirdPoint)
+        // So: edge p3-p1 (index 2) has length sideLeft = L
+        //     edge p2-p3 (index 1) has length sideRight = R
+        // We label these as L and R for clarity
+        const edgeLabels: [string, string, string] = ['Ref', 'R', 'L'];
 
         return {
             id: def.id || 'phantom',
@@ -97,6 +98,14 @@ export const calculateAttachedTriangle = (
         };
     }
     return null;
+};
+
+// Helper to determine if points are in clockwise order
+const isClockwise = (p1: Point, p2: Point, p3: Point): boolean => {
+    // Cross product of (p2-p1) and (p3-p1)
+    // Positive = counter-clockwise, Negative = clockwise (in screen coords where Y is down)
+    const cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+    return cross > 0;
 };
 
 // Re-computes the entire geometry based on the definitions
@@ -126,10 +135,8 @@ export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], tri
                 p2 = { id: `p_${def.id}_2`, x: sa, y: 0, label: '' };
             }
 
-            // CONFIGURATION: A=Bottom, B=Left, C=Right
-            // Note: In SVG, Y increases downwards. Default calculateThirdPoint (flip=false) results in Positive Y (Down).
-            // User requests "Upward Convex" (vertex at top), which requires Negative Y.
-            // We pass !def.flip so that default (false) becomes true -> sign -1 -> Negative Y (Up).
+            // Calculate p3: sideB = p1-p3 (left), sideC = p2-p3 (right)
+            // Use !def.flip to default to "upward" vertex
             const p3 = calculateThirdPoint(p1, p2, sb, sc, !def.flip);
 
             if (p3) {
@@ -137,11 +144,14 @@ export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], tri
                 const area = calculateHeronArea(sa, sb, sc);
 
                 // edgeLabels: [p1-p2, p2-p3, p3-p1]
-                // sb = p1-p3 = B (left side), sc = p2-p3 = C (right side)
-                // We use !def.flip for calculation, so labels follow the inverted logic
-                const edgeLabels: [string, string, string] = def.flip
-                    ? ['A', 'B', 'C']  // flipped (calc with false): p2-p3=B, p3-p1=C
-                    : ['A', 'C', 'B']; // normal (calc with true): p2-p3=C, p3-p1=B
+                // We want B on the left (p3-p1) and C on the right (p2-p3)
+                // But "left" and "right" depend on the clockwise/counter-clockwise order
+                // In clockwise order: p1 -> p2 -> p3 -> p1, left of p1-p2 is towards p3
+                //
+                // sideB is defined as p1-p3 distance, sideC is p2-p3 distance
+                // So edge p3-p1 has length sideB, edge p2-p3 has length sideC
+                // edgeLabels[1] = p2-p3 = C, edgeLabels[2] = p3-p1 = B
+                const edgeLabels: [string, string, string] = ['A', 'C', 'B'];
 
                 const t: RenderedTriangle = {
                     id: def.id,
