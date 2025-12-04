@@ -1,0 +1,3428 @@
+# TriangleListAI - Merged Codebase for AI Analysis
+# Generated: Thu, Dec  4, 2025  1:34:18 PM
+# This file is for AI Studio import. Original files are preserved.
+
+//===============================================================================
+// FILE: package.json
+//===============================================================================
+{
+  "name": "geosolver:-trianglelist",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "^1.30.0",
+    "konva": "^10.0.12",
+    "lucide-react": "^0.555.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-konva": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+
+
+//===============================================================================
+// FILE: index.html
+//===============================================================================
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GeoSolver: TriangleList</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #f8fafc;
+      }
+      /* Custom scrollbar for the list */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
+
+//===============================================================================
+// FILE: types.ts
+//===============================================================================
+
+export interface Point {
+  id: string;
+  x: number;
+  y: number;
+  label?: string;
+}
+
+export interface RenderedTriangle {
+  id: string;
+  name: string;
+  p1: Point;
+  p2: Point;
+  p3: Point;
+  color: string;
+  area: number;
+  paramId: string; // Link back to the definition
+  edgeLabels: [string, string, string]; // Labels for p1-p2, p2-p3, p3-p1
+}
+
+// The source of truth
+export interface TriangleDef {
+  id: string;
+  name: string;
+  color: string;
+
+  // For the very first triangle (Root)
+  isRoot: boolean;
+  sideA?: number; // Base
+  sideB?: number; // Left
+  sideC?: number; // Right
+
+  // Origin offset for root triangle (if created from standalone edge)
+  originP1?: Point; // Start point of base edge
+  originP2?: Point; // End point of base edge
+
+  // For attached triangles
+  attachedToTriangleId?: string;
+  attachedEdgeIndex?: 0 | 1 | 2; // 0=p1-p2, 1=p2-p3, 2=p3-p1
+  sideLeft?: number;  // Distance from edge start
+  sideRight?: number; // Distance from edge end
+  flip?: boolean;     // Flip across the base edge
+}
+
+export interface GeometryData {
+  points: Point[];
+  triangles: RenderedTriangle[];
+}
+
+export enum ToolMode {
+  VIEW = 'VIEW',
+  ADD_TRIANGLE = 'ADD_TRIANGLE',
+  DELETE = 'DELETE'
+}
+
+// Standalone edge (not part of a triangle yet)
+export interface StandaloneEdge {
+  id: string;
+  p1: Point;
+  p2: Point;
+  length: number;
+}
+
+//===============================================================================
+// FILE: constants.ts
+//===============================================================================
+
+export const CANVAS_WIDTH = 800;
+export const CANVAS_HEIGHT = 600;
+export const GRID_SIZE = 5; // Default grid size in meters
+
+export const PALETTE = [
+  '#3b82f6', // blue-500
+  '#ef4444', // red-500
+  '#10b981', // emerald-500
+  '#f59e0b', // amber-500
+  '#8b5cf6', // violet-500
+  '#ec4899', // pink-500
+  '#06b6d4', // cyan-500
+];
+
+export const INITIAL_INSTRUCTION = `
+1. Create a Base Triangle by specifying 3 side lengths (meters).
+2. Click any edge on the canvas to attach a new triangle.
+3. Use the list to manage your shapes.
+`;
+
+
+//===============================================================================
+// FILE: utils/geometryUtils.ts
+//===============================================================================
+
+import { Point, TriangleDef, RenderedTriangle } from '../types';
+
+export const generateId = (): string => Math.random().toString(36).substring(2, 9);
+
+export const distance = (p1: Point, p2: Point): number => {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+};
+
+// Calculate coordinates of P3 given P1, P2 and lengths L13 (p1-p3), L23 (p2-p3)
+// This uses circle intersection logic
+export const calculateThirdPoint = (
+  p1: Point,
+  p2: Point,
+  L13: number,
+  L23: number,
+  flip: boolean
+): Point | null => {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+
+  // Triangle inequality check
+  if (d > L13 + L23 || d < Math.abs(L13 - L23) || d === 0) {
+    return null; // Impossible to form a triangle
+  }
+
+  // Calculate the point along the line P1-P2 where the altitude hits
+  const a = (L13 * L13 - L23 * L23 + d * d) / (2 * d);
+  
+  // Calculate the height of the triangle
+  const h = Math.sqrt(Math.max(0, L13 * L13 - a * a));
+
+  // Calculate coordinates
+  // (x2, y2) is the base point on the line
+  const x2 = p1.x + (dx * a) / d;
+  const y2 = p1.y + (dy * a) / d;
+
+  // Offset by height in the perpendicular direction
+  // If flip is true, we subtract, otherwise add (or vice versa depending on system)
+  // SVG coordinates: y increases downwards. 
+  // Perpendicular vector to (dx, dy) is (-dy, dx) or (dy, -dx)
+  
+  const sign = flip ? -1 : 1;
+  const rx = x2 + sign * (h * -dy) / d;
+  const ry = y2 + sign * (h * dx) / d;
+
+  return {
+    id: generateId(),
+    x: rx,
+    y: ry,
+    label: ''
+  };
+};
+
+export const calculateHeronArea = (a: number, b: number, c: number): number => {
+    const s = (a + b + c) / 2;
+    return Math.sqrt(Math.max(0, s * (s - a) * (s - b) * (s - c)));
+};
+
+// Helper to calculate a single attached triangle
+export const calculateAttachedTriangle = (
+    parent: RenderedTriangle,
+    def: Partial<TriangleDef> & { sideLeft: number, sideRight: number, attachedEdgeIndex: 0 | 1 | 2 }
+): RenderedTriangle | null => {
+    let baseP1: Point, baseP2: Point;
+    
+    // Determine base edge
+    if (def.attachedEdgeIndex === 0) { baseP1 = parent.p1; baseP2 = parent.p2; }
+    else if (def.attachedEdgeIndex === 1) { baseP1 = parent.p2; baseP2 = parent.p3; }
+    else { baseP1 = parent.p3; baseP2 = parent.p1; }
+
+    const pNew = calculateThirdPoint(baseP1, baseP2, def.sideLeft, def.sideRight, !!def.flip);
+
+    if (pNew) {
+        pNew.id = `p_${def.id || 'phantom'}_3`;
+        const baseLen = distance(baseP1, baseP2);
+        const area = calculateHeronArea(baseLen, def.sideLeft, def.sideRight);
+
+        // edgeLabels: [p1-p2, p2-p3, p3-p1]
+        // sideLeft = baseP1-pNew distance (L parameter in calculateThirdPoint)
+        // sideRight = baseP2-pNew distance (R parameter in calculateThirdPoint)
+        // So: edge p3-p1 (index 2) has length sideLeft = L
+        //     edge p2-p3 (index 1) has length sideRight = R
+        // We label these as L and R for clarity
+        const edgeLabels: [string, string, string] = ['Ref', 'R', 'L'];
+
+        return {
+            id: def.id || 'phantom',
+            name: def.name || 'Phantom',
+            p1: baseP1,
+            p2: baseP2,
+            p3: pNew,
+            color: def.color || '#e2e8f0',
+            area,
+            paramId: def.id || 'phantom',
+            edgeLabels
+        };
+    }
+    return null;
+};
+
+// Helper to determine if points are in clockwise order
+const isClockwise = (p1: Point, p2: Point, p3: Point): boolean => {
+    // Cross product of (p2-p1) and (p3-p1)
+    // Positive = counter-clockwise, Negative = clockwise (in screen coords where Y is down)
+    const cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+    return cross > 0;
+};
+
+// Re-computes the entire geometry based on the definitions
+export const recalculateGeometry = (defs: TriangleDef[]): { points: Point[], triangles: RenderedTriangle[] } => {
+    let points: Point[] = [];
+    let triangles: RenderedTriangle[] = [];
+
+    // Map to quickly find triangle coordinates by ID
+    const triangleMap = new Map<string, RenderedTriangle>();
+
+    // Sort defs to ensure parents are processed before children
+    for (const def of defs) {
+        if (def.isRoot) {
+            const sa = def.sideA || 10;
+            const sb = def.sideB || 10;
+            const sc = def.sideC || 10;
+
+            let p1: Point, p2: Point;
+
+            // Use origin coordinates if provided (from standalone edge), otherwise place at origin
+            if (def.originP1 && def.originP2) {
+                p1 = { id: `p_${def.id}_1`, x: def.originP1.x, y: def.originP1.y, label: 'Start' };
+                p2 = { id: `p_${def.id}_2`, x: def.originP2.x, y: def.originP2.y, label: '' };
+            } else {
+                // Default: place at origin (0, 0) with p2 along X axis
+                p1 = { id: `p_${def.id}_1`, x: 0, y: 0, label: 'Start' };
+                p2 = { id: `p_${def.id}_2`, x: sa, y: 0, label: '' };
+            }
+
+            // Calculate p3: sideB = p1-p3 (left), sideC = p2-p3 (right)
+            // Use !def.flip to default to "upward" vertex
+            const p3 = calculateThirdPoint(p1, p2, sb, sc, !def.flip);
+
+            if (p3) {
+                p3.id = `p_${def.id}_3`;
+                const area = calculateHeronArea(sa, sb, sc);
+
+                // edgeLabels: [p1-p2, p2-p3, p3-p1]
+                // We want B on the left (p3-p1) and C on the right (p2-p3)
+                // But "left" and "right" depend on the clockwise/counter-clockwise order
+                // In clockwise order: p1 -> p2 -> p3 -> p1, left of p1-p2 is towards p3
+                //
+                // sideB is defined as p1-p3 distance, sideC is p2-p3 distance
+                // So edge p3-p1 has length sideB, edge p2-p3 has length sideC
+                // edgeLabels[1] = p2-p3 = C, edgeLabels[2] = p3-p1 = B
+                const edgeLabels: [string, string, string] = ['A', 'C', 'B'];
+
+                const t: RenderedTriangle = {
+                    id: def.id,
+                    name: def.name,
+                    p1, p2, p3,
+                    color: def.color,
+                    area,
+                    paramId: def.id,
+                    edgeLabels
+                };
+                triangles.push(t);
+                triangleMap.set(def.id, t);
+                points.push(p1, p2, p3);
+            }
+        } else {
+            // Attached triangle
+            const parent = triangleMap.get(def.attachedToTriangleId || '');
+            if (parent && def.sideLeft && def.sideRight && def.attachedEdgeIndex !== undefined) {
+                const t = calculateAttachedTriangle(parent, def as any);
+                if (t) {
+                    triangles.push(t);
+                    triangleMap.set(def.id, t);
+                    points.push(t.p3);
+                }
+            }
+        }
+    }
+
+    return { points, triangles };
+};
+
+export const getCentroid = (t: RenderedTriangle): Point => {
+    return {
+        id: 'centroid',
+        x: (t.p1.x + t.p2.x + t.p3.x) / 3,
+        y: (t.p1.y + t.p2.y + t.p3.y) / 3
+    };
+};
+
+// Validate triangle inequality for root triangle
+export const isValidRootTriangle = (sideA: number, sideB: number, sideC: number): boolean => {
+    if (sideA <= 0 || sideB <= 0 || sideC <= 0) return false;
+    return (sideA + sideB > sideC) && (sideB + sideC > sideA) && (sideC + sideA > sideB);
+};
+
+// Validate triangle inequality for attached triangle
+export const isValidAttachedTriangle = (refEdge: number, sideLeft: number, sideRight: number): boolean => {
+    if (refEdge <= 0 || sideLeft <= 0 || sideRight <= 0) return false;
+    return (refEdge < sideLeft + sideRight) && (sideLeft < refEdge + sideRight) && (sideRight < refEdge + sideLeft);
+};
+
+
+//===============================================================================
+// FILE: utils/dxfExport.ts
+//===============================================================================
+import { RenderedTriangle, Point } from '../types';
+
+// DXF color constants
+const COLOR_BLUE = 5;      // Blue for triangle numbers
+const COLOR_GRAY = 8;      // Gray for edges and dimensions
+
+// Helper to flip Y coordinate (screen Y is inverted from CAD Y)
+const flipY = (y: number): number => -y;
+
+// Calculate distance between two points
+const distance = (p1: Point, p2: Point): number => {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+};
+
+// Generate DXF file content from triangles
+export const generateDXF = (triangles: RenderedTriangle[]): string => {
+  const lines: string[] = [];
+
+  // DXF Header
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('HEADER');
+  lines.push('9');
+  lines.push('$ACADVER');
+  lines.push('1');
+  lines.push('AC1009'); // AutoCAD R12 format for compatibility
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // Tables section (minimal)
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('TABLES');
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // Entities section
+  lines.push('0');
+  lines.push('SECTION');
+  lines.push('2');
+  lines.push('ENTITIES');
+
+  // Add each triangle
+  triangles.forEach((t) => {
+    const p1 = { x: t.p1.x, y: flipY(t.p1.y) };
+    const p2 = { x: t.p2.x, y: flipY(t.p2.y) };
+    const p3 = { x: t.p3.x, y: flipY(t.p3.y) };
+
+    // Triangle edges (gray)
+    lines.push(...createLine(p1.x, p1.y, p2.x, p2.y, COLOR_GRAY));
+    lines.push(...createLine(p2.x, p2.y, p3.x, p3.y, COLOR_GRAY));
+    lines.push(...createLine(p3.x, p3.y, p1.x, p1.y, COLOR_GRAY));
+
+    // Dimension labels at edge midpoints
+    const edges = [
+      { start: p1, end: p2, label: t.edgeLabels?.[0] },
+      { start: p2, end: p3, label: t.edgeLabels?.[1] },
+      { start: p3, end: p1, label: t.edgeLabels?.[2] },
+    ];
+
+    // Calculate centroid for determining "outside" direction
+    const cx = (p1.x + p2.x + p3.x) / 3;
+    const cy = (p1.y + p2.y + p3.y) / 3;
+    const textHeight = 0.3;
+    const offsetDist = textHeight * 0.5;
+
+    edges.forEach((edge) => {
+      // Skip Ref edges (shared with parent)
+      if (edge.label === 'Ref') return;
+
+      const midX = (edge.start.x + edge.end.x) / 2;
+      const midY = (edge.start.y + edge.end.y) / 2;
+      const len = distance(edge.start as Point, edge.end as Point);
+      const dimText = len.toFixed(2);
+
+      // Calculate edge direction and perpendicular
+      const dx = edge.end.x - edge.start.x;
+      const dy = edge.end.y - edge.start.y;
+      const edgeLen = Math.sqrt(dx * dx + dy * dy);
+
+      // Perpendicular vector (normalized)
+      const perpX = -dy / edgeLen;
+      const perpY = dx / edgeLen;
+
+      // Determine which side is "outside" (away from centroid)
+      const toMidX = midX - cx;
+      const toMidY = midY - cy;
+      const dot = toMidX * perpX + toMidY * perpY;
+      const sign = dot >= 0 ? 1 : -1;
+
+      // Offset position
+      const labelX = midX + sign * perpX * offsetDist;
+      const labelY = midY + sign * perpY * offsetDist;
+
+      // Calculate angle for text rotation
+      let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+      // Keep text readable (not upside down)
+      if (angle > 90 || angle < -90) {
+        angle += 180;
+      }
+
+      lines.push(...createText(labelX, labelY, dimText, textHeight, COLOR_GRAY, angle));
+    });
+
+    // Triangle number in circle at centroid (blue)
+    const number = t.name.replace(/\D/g, '');
+
+    // Circle around number
+    lines.push(...createCircle(cx, cy, 0.5, COLOR_BLUE));
+    // Number text
+    lines.push(...createText(cx, cy, number, 0.4, COLOR_BLUE, 0));
+  });
+
+  lines.push('0');
+  lines.push('ENDSEC');
+
+  // EOF
+  lines.push('0');
+  lines.push('EOF');
+
+  return lines.join('\n');
+};
+
+// Create a LINE entity
+const createLine = (x1: number, y1: number, x2: number, y2: number, color: number): string[] => {
+  return [
+    '0',
+    'LINE',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x1.toFixed(4),
+    '20',
+    y1.toFixed(4),
+    '30',
+    '0', // Z1
+    '11',
+    x2.toFixed(4),
+    '21',
+    y2.toFixed(4),
+    '31',
+    '0', // Z2
+  ];
+};
+
+// Create a CIRCLE entity
+const createCircle = (x: number, y: number, radius: number, color: number): string[] => {
+  return [
+    '0',
+    'CIRCLE',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x.toFixed(4),
+    '20',
+    y.toFixed(4),
+    '30',
+    '0', // Z
+    '40',
+    radius.toFixed(4), // Radius
+  ];
+};
+
+// Create a TEXT entity with rotation
+const createText = (x: number, y: number, text: string, height: number, color: number, rotation: number = 0): string[] => {
+  return [
+    '0',
+    'TEXT',
+    '8',
+    '0', // Layer
+    '62',
+    color.toString(), // Color
+    '10',
+    x.toFixed(4),
+    '20',
+    y.toFixed(4),
+    '30',
+    '0', // Z
+    '40',
+    height.toFixed(4), // Text height
+    '1',
+    text, // Text content
+    '50',
+    rotation.toFixed(2), // Rotation angle
+    '72',
+    '1', // Horizontal justification: center
+    '73',
+    '2', // Vertical justification: middle
+    '11',
+    x.toFixed(4), // Alignment point X
+    '21',
+    y.toFixed(4), // Alignment point Y
+    '31',
+    '0',
+  ];
+};
+
+// Download DXF file
+export const downloadDXF = (triangles: RenderedTriangle[], filename: string = 'triangles.dxf'): void => {
+  const dxfContent = generateDXF(triangles);
+  const blob = new Blob([dxfContent], { type: 'application/dxf' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+
+//===============================================================================
+// FILE: components/GeometryCanvas.tsx
+//===============================================================================
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
+import Konva from 'konva';
+import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
+import { getCentroid, distance, generateId, calculateThirdPoint } from '../utils/geometryUtils';
+import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+
+interface GeometryCanvasProps {
+  triangles: RenderedTriangle[];
+  mode: ToolMode;
+  selectedTriangleId: string | null;
+  onSelectTriangle: (id: string) => void;
+  onEdgeSelect: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
+  onEdgeDoubleClick: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
+  onDimensionChange?: (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number) => boolean;
+  onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onBackgroundClick?: () => void;
+  selectedEdge: { triangleId: string, edgeIndex: 0 | 1 | 2 } | null;
+  occupiedEdges?: Set<string>;
+  standaloneEdges?: StandaloneEdge[];
+  onAddStandaloneEdge?: (p1: Point, p2: Point) => void;
+  onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onDeleteTriangle?: (id: string) => void;
+  onDeleteStandaloneEdge?: (id: string) => void;
+  onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
+  onMoveTriangles?: (ids: string[], dx: number, dy: number) => void;
+  onMoveStandaloneEdges?: (ids: string[], dx: number, dy: number) => void;
+  // Root triangle placement mode
+  rootPlacingMode?: { sideA: number; sideB: number; sideC: number } | null;
+  onRootPlacingComplete?: (origin: Point, angle: number) => void;
+  onRootPlacingCancel?: () => void;
+}
+
+type InteractionState =
+  | { type: 'IDLE' }
+  | { type: 'PAN_READY'; startX: number; startY: number }
+  | { type: 'PANNING'; lastX: number; lastY: number }
+  | { type: 'SELECT_RECT'; startWorld: Point; currentWorld: Point }
+  | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
+  | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'DRAWING_EDGE'; startPoint: Point; currentMouse: Point }
+  | { type: 'STANDALONE_EDGE_PLACING'; edgeId: string; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point }
+  | { type: 'ROOT_PLACING_ORIGIN'; sideA: number; sideB: number; sideC: number; currentMouse: Point }
+  | { type: 'ROOT_PLACING_ANGLE'; sideA: number; sideB: number; sideC: number; origin: Point; currentMouse: Point }
+  | { type: 'MOVING_SELECTION'; startWorld: Point; currentWorld: Point; targetIds: Set<string> };
+
+// Context menu state
+type ContextMenuState = {
+  x: number;  // Screen coordinates
+  y: number;
+  targetType: 'triangle' | 'edge' | 'selection';
+  targetId?: string;
+} | null;
+
+// Long press duration in milliseconds
+const LONG_PRESS_DURATION = 600;
+
+const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
+  triangles,
+  mode,
+  selectedTriangleId,
+  onSelectTriangle,
+  onEdgeSelect,
+  onEdgeDoubleClick,
+  onDimensionChange,
+  onAddAttachedTriangle,
+  onVertexReshape,
+  onBackgroundClick,
+  selectedEdge,
+  occupiedEdges,
+  standaloneEdges = [],
+  onAddStandaloneEdge,
+  onAddTriangleFromEdge,
+  onDeleteTriangle,
+  onDeleteStandaloneEdge,
+  onUpdateStandaloneEdgeLength,
+  onMoveTriangles,
+  onMoveStandaloneEdges,
+  rootPlacingMode,
+  onRootPlacingComplete,
+  onRootPlacingCancel
+}) => {
+  const stageRef = useRef<Konva.Stage>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressStartPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Multi-selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+
+  // Delete confirmation state
+  const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'triangle' | 'edge'; id: string; name: string } | null>(null);
+  const [deleteInput, setDeleteInput] = useState('');
+
+  // Viewport state - using scale and position for Konva
+  const [stageScale, setStageScale] = useState(1);
+  const [stagePosition, setStagePosition] = useState({ x: 200, y: 150 }); // Initial offset to center view
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [interaction, setInteraction] = useState<InteractionState>({ type: 'IDLE' });
+  const [editingDim, setEditingDim] = useState<{ tId: string, index: 0 | 1 | 2, value: string, originalValue: number, label: string } | null>(null);
+  const [editingEdgeDim, setEditingEdgeDim] = useState<{ edgeId: string, value: string, originalValue: number } | null>(null);
+  const [editingInputPos, setEditingInputPos] = useState<{ x: number; y: number; angle: number; fontSize: number } | null>(null);
+
+  // Debug console state
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const addLog = useCallback((msg: string) => {
+    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    setDebugLogs(prev => [...prev.slice(-19), `[${timestamp}] ${msg}`]);
+  }, []);
+
+  // Track interaction state changes
+  useEffect(() => {
+    addLog(`interaction -> ${interaction.type}`);
+  }, [interaction.type, addLog]);
+
+  // Initial viewport: -10, -10 to 40, 30 (width: 50, height: 40)
+  // CAD-like coordinate system: origin at bottom-left, positive X right, positive Y up
+  // But screen Y is inverted, so we use negative Y values for "up"
+  const worldBounds = { x: 0, y: -40, w: 50, h: 40 };
+
+  // Determine which side of the edge (p1->p2) the mouse point is on
+  // Returns true if the point is on the "flip" side (negative cross product)
+  const isFlipSide = useCallback((p1: Point, p2: Point, mouse: Point): boolean => {
+    // Cross product of (p2-p1) and (mouse-p1)
+    const cross = (p2.x - p1.x) * (mouse.y - p1.y) - (p2.y - p1.y) * (mouse.x - p1.x);
+    return cross < 0;
+  }, []);
+
+  // Snap threshold in world units
+  const SNAP_THRESHOLD = 0.5;
+
+  // Get all snap points (triangle vertices and standalone edge endpoints)
+  const getSnapPoints = useCallback((): Point[] => {
+    const points: Point[] = [];
+
+    // Add all triangle vertices
+    triangles.forEach(t => {
+      points.push(t.p1, t.p2, t.p3);
+    });
+
+    // Add standalone edge endpoints
+    standaloneEdges.forEach(e => {
+      points.push(e.p1, e.p2);
+    });
+
+    return points;
+  }, [triangles, standaloneEdges]);
+
+  // Find nearest snap point within threshold
+  const findSnapPoint = useCallback((mouse: Point, excludePoints?: Point[]): Point | null => {
+    const snapPoints = getSnapPoints();
+    let nearest: Point | null = null;
+    let nearestDist = SNAP_THRESHOLD;
+
+    for (const p of snapPoints) {
+      // Skip excluded points (e.g., the base edge endpoints when adding triangle)
+      if (excludePoints?.some(ep => Math.abs(ep.x - p.x) < 0.001 && Math.abs(ep.y - p.y) < 0.001)) {
+        continue;
+      }
+
+      const dist = distance(mouse, p);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = p;
+      }
+    }
+
+    return nearest;
+  }, [getSnapPoints]);
+
+  // Apply snap to a point
+  const applySnap = useCallback((mouse: Point, excludePoints?: Point[]): Point => {
+    const snapPoint = findSnapPoint(mouse, excludePoints);
+    return snapPoint || mouse;
+  }, [findSnapPoint]);
+
+  // Long press handlers - now opens context menu instead of delete dialog
+  const startEntityLongPress = useCallback((type: 'triangle' | 'edge', id: string, screenX: number, screenY: number) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+    longPressStartPosRef.current = { x: screenX, y: screenY };
+
+    longPressTimerRef.current = window.setTimeout(() => {
+      // Show context menu on long press
+      setContextMenu({ x: screenX, y: screenY, targetType: type, targetId: id });
+      longPressTimerRef.current = null;
+    }, LONG_PRESS_DURATION);
+  }, []);
+
+  // Long press on background - starts SELECT_RECT mode
+  const startBackgroundLongPress = useCallback((screenX: number, screenY: number, worldPoint: Point) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+    longPressStartPosRef.current = { x: screenX, y: screenY };
+
+    longPressTimerRef.current = window.setTimeout(() => {
+      // Start selection rectangle
+      setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+      longPressTimerRef.current = null;
+    }, LONG_PRESS_DURATION);
+  }, []);
+
+  const cancelLongPress = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressStartPosRef.current = null;
+  }, []);
+
+  // Right-click handler for context menu
+  const handleContextMenu = useCallback((e: React.MouseEvent | Konva.KonvaEventObject<MouseEvent>, type: 'triangle' | 'edge' | 'selection', id?: string) => {
+    if ('evt' in e) {
+      e.evt.preventDefault();
+      setContextMenu({ x: e.evt.clientX, y: e.evt.clientY, targetType: type, targetId: id });
+    } else {
+      e.preventDefault();
+      setContextMenu({ x: e.clientX, y: e.clientY, targetType: type, targetId: id });
+    }
+  }, []);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Enter root placing mode when rootPlacingMode is set
+  useEffect(() => {
+    if (rootPlacingMode) {
+      setInteraction({
+        type: 'ROOT_PLACING_ORIGIN',
+        sideA: rootPlacingMode.sideA,
+        sideB: rootPlacingMode.sideB,
+        sideC: rootPlacingMode.sideC,
+        currentMouse: { id: generateId(), x: 0, y: 0 }
+      });
+    } else {
+      // Cancel placing mode if rootPlacingMode becomes null
+      if (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE') {
+        setInteraction({ type: 'IDLE' });
+      }
+    }
+  }, [rootPlacingMode]);
+
+  // Convert world coordinates to stage coordinates
+  const worldToStage = useCallback((worldX: number, worldY: number): { x: number; y: number } => {
+    const normalizedX = (worldX - worldBounds.x) / worldBounds.w;
+    const normalizedY = (worldY - worldBounds.y) / worldBounds.h;
+    return {
+      x: normalizedX * 1000, // Use a fixed virtual canvas size
+      y: normalizedY * 800
+    };
+  }, []);
+
+  // Convert stage coordinates to world coordinates
+  const stageToWorld = useCallback((stageX: number, stageY: number): { x: number; y: number } => {
+    const normalizedX = stageX / 1000;
+    const normalizedY = stageY / 800;
+    return {
+      x: worldBounds.x + normalizedX * worldBounds.w,
+      y: worldBounds.y + normalizedY * worldBounds.h
+    };
+  }, []);
+
+  // Get world point from stage event
+  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent>): Point => {
+    if (!stageRef.current) return { id: generateId(), x: 0, y: 0 };
+    const stage = stageRef.current;
+    const pointerPos = stage.getPointerPosition();
+    if (!pointerPos) return { id: generateId(), x: 0, y: 0 };
+    
+    // Get position relative to stage
+    const stageX = (pointerPos.x - stage.x()) / stage.scaleX();
+    const stageY = (pointerPos.y - stage.y()) / stage.scaleY();
+    
+    const world = stageToWorld(stageX, stageY);
+    return { id: generateId(), x: world.x, y: world.y };
+  }, [stageToWorld]);
+
+  // Calculate bounding box of all entities
+  const getEntitiesBounds = useCallback(() => {
+    const allPoints: Point[] = [];
+
+    // Collect all triangle vertices
+    triangles.forEach(t => {
+      allPoints.push(t.p1, t.p2, t.p3);
+    });
+
+    // Collect all standalone edge endpoints
+    standaloneEdges.forEach(e => {
+      allPoints.push(e.p1, e.p2);
+    });
+
+    if (allPoints.length === 0) {
+      // No entities, return default bounds
+      return null;
+    }
+
+    const xs = allPoints.map(p => p.x);
+    const ys = allPoints.map(p => p.y);
+
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Add padding
+    const padding = Math.max(maxX - minX, maxY - minY) * 0.2 || 5;
+
+    return {
+      minX: minX - padding,
+      maxX: maxX + padding,
+      minY: minY - padding,
+      maxY: maxY + padding,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2,
+      width: maxX - minX + padding * 2,
+      height: maxY - minY + padding * 2
+    };
+  }, [triangles, standaloneEdges]);
+
+  // Track if this is the first render with entities
+  const hasInitializedView = useRef(false);
+
+  // Initialize stage size
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        setStageSize({ width: rect.width, height: rect.height });
+
+        // Only set initial scale/position on first load
+        if (!hasInitializedView.current) {
+          // Calculate initial scale to fit world bounds
+          const scaleX = rect.width / 1000;
+          const scaleY = rect.height / 800;
+          const initialScale = Math.min(scaleX, scaleY) * 0.9;
+          setStageScale(initialScale);
+
+          // Center the view
+          const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+          const centerY = rect.height / 2 - (800 * initialScale) / 2;
+          setStagePosition({ x: centerX, y: centerY });
+        }
+      }
+    };
+
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, []);
+
+  // Auto-center on entities when they first appear (initial load)
+  useEffect(() => {
+    if (hasInitializedView.current) return;
+    if (triangles.length === 0 && standaloneEdges.length === 0) return;
+    if (!containerRef.current) return;
+
+    const bounds = getEntitiesBounds();
+    if (!bounds) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+
+    // Calculate scale to fit entities
+    const entityStageWidth = bounds.width * (1000 / worldBounds.w);
+    const entityStageHeight = bounds.height * (800 / worldBounds.h);
+
+    const scaleX = rect.width / entityStageWidth;
+    const scaleY = rect.height / entityStageHeight;
+    const fitScale = Math.min(scaleX, scaleY) * 0.8; // 80% to leave margin
+
+    // Convert entity center to stage coordinates
+    const centerStage = worldToStage(bounds.centerX, bounds.centerY);
+
+    // Position stage so that entity center is at screen center
+    const newX = rect.width / 2 - centerStage.x * fitScale;
+    const newY = rect.height / 2 - centerStage.y * fitScale;
+
+    setStageScale(fitScale);
+    setStagePosition({ x: newX, y: newY });
+
+    hasInitializedView.current = true;
+  }, [triangles, standaloneEdges, getEntitiesBounds, worldToStage]);
+
+  const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (e.evt.button === 0 && !editingDim) {
+      // If in moving selection mode, confirm the move on click
+      if (interaction.type === 'MOVING_SELECTION') {
+        const { startWorld, currentWorld, targetIds } = interaction;
+        const dx = currentWorld.x - startWorld.x;
+        const dy = currentWorld.y - startWorld.y;
+
+        addLog(`MOVE CONFIRM: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
+
+        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+          const triangleIds: string[] = [];
+          const edgeIds: string[] = [];
+
+          targetIds.forEach(id => {
+            if (triangles.find(t => t.id === id)) {
+              triangleIds.push(id);
+            } else if (standaloneEdges.find(edge => edge.id === id)) {
+              edgeIds.push(id);
+            }
+          });
+
+          addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
+
+          if (triangleIds.length > 0 && onMoveTriangles) {
+            addLog(`Calling onMoveTriangles`);
+            onMoveTriangles(triangleIds, dx, dy);
+          }
+          if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+            addLog(`Calling onMoveStandaloneEdges`);
+            onMoveStandaloneEdges(edgeIds, dx, dy);
+          }
+        }
+
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If in root placing origin mode, set the origin
+      if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+        const origin = getWorldPoint(e);
+        const snappedOrigin = applySnap(origin, []);
+        setInteraction({
+          type: 'ROOT_PLACING_ANGLE',
+          sideA: interaction.sideA,
+          sideB: interaction.sideB,
+          sideC: interaction.sideC,
+          origin: snappedOrigin,
+          currentMouse: snappedOrigin
+        });
+        return;
+      }
+      // If in root placing angle mode, complete the placement
+      if (interaction.type === 'ROOT_PLACING_ANGLE') {
+        const { origin, currentMouse, sideA } = interaction;
+        // Calculate angle from origin to currentMouse
+        const dx = currentMouse.x - origin.x;
+        const dy = currentMouse.y - origin.y;
+        const angle = Math.atan2(dy, dx);
+        if (onRootPlacingComplete) {
+          onRootPlacingComplete(origin, angle);
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If in phantom placing mode, confirm the triangle on click
+      if (interaction.type === 'PHANTOM_PLACING') {
+        if (onAddAttachedTriangle) {
+          const { p1, p2, currentMouse, tId, index } = interaction;
+          // Check if this edge is already occupied
+          const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+          if (isOccupied) {
+            // Edge already has a child triangle - don't add another
+            setInteraction({ type: 'IDLE' });
+            return;
+          }
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If in vertex reshaping mode, confirm the reshape on click
+      if (interaction.type === 'VERTEX_RESHAPING') {
+        if (onVertexReshape) {
+          const { p1, p2, currentMouse, tId } = interaction;
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onVertexReshape(tId, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If drawing edge, confirm on click
+      if (interaction.type === 'DRAWING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { startPoint, currentMouse } = interaction;
+          // Apply snap (exclude start point)
+          const snappedMouse = applySnap(currentMouse, [startPoint]);
+          const len = distance(startPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(startPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If placing triangle from standalone edge, confirm on click
+      if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+        if (onAddTriangleFromEdge) {
+          const { edgeId, p1, p2, currentMouse } = interaction;
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If extending edge, confirm on click
+      if (interaction.type === 'EXTENDING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { fromPoint, currentMouse } = interaction;
+          // Apply snap (exclude from point)
+          const snappedMouse = applySnap(currentMouse, [fromPoint]);
+          const len = distance(fromPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(fromPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // Start long press timer for SELECT_RECT
+      const worldPoint = getWorldPoint(e);
+      startBackgroundLongPress(e.evt.clientX, e.evt.clientY, worldPoint);
+      setInteraction({ type: 'PAN_READY', startX: e.evt.clientX, startY: e.evt.clientY });
+    }
+  };
+
+  // Double click on background to start drawing an edge
+  // This is called from the background Rect, not Stage, to avoid intercepting other element events
+  const handleBackgroundDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Only handle if click target is the background rect itself
+    const targetName = e.target.name();
+    if (targetName !== 'background-rect') return;
+
+    // Allow adding edges anytime
+    const startPoint = getWorldPoint(e);
+    setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+  };
+
+  const handleEdgeMouseDown = (e: Konva.KonvaEventObject<MouseEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
+    e.evt.stopPropagation();
+    if (e.evt.button === 0 && !editingDim) {
+      setInteraction({
+        type: 'EDGE_READY',
+        tId,
+        index,
+        p1,
+        p2,
+        startX: e.evt.clientX,
+        startY: e.evt.clientY
+      });
+    }
+  };
+
+  const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Cancel long press if mouse moved too much
+    if (longPressStartPosRef.current && longPressTimerRef.current) {
+      const dx = e.evt.clientX - longPressStartPosRef.current.x;
+      const dy = e.evt.clientY - longPressStartPosRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+        cancelLongPress();
+      }
+    }
+
+    if (interaction.type === 'SELECT_RECT') {
+      const currentWorld = getWorldPoint(e);
+      setInteraction({ ...interaction, currentWorld });
+      return;
+    } else if (interaction.type === 'MOVING_SELECTION') {
+      const currentWorld = getWorldPoint(e);
+      setInteraction({ ...interaction, currentWorld });
+      return;
+    } else if (interaction.type === 'PAN_READY') {
+      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
+      if (dist > 3) {
+        cancelLongPress(); // Cancel long press when starting to pan
+        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+      }
+    } else if (interaction.type === 'PANNING') {
+      const dx = e.evt.clientX - interaction.lastX;
+      const dy = e.evt.clientY - interaction.lastY;
+      setStagePosition(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+    } else if (interaction.type === 'EDGE_READY') {
+      // Dragging on edge no longer creates triangle - switch to panning instead
+      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
+      if (dist > 5) {
+        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
+      }
+    } else if (interaction.type === 'PHANTOM_PLACING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'VERTEX_RESHAPING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'DRAWING_EDGE') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'EXTENDING_EDGE') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'ROOT_PLACING_ANGLE') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
+    }
+  };
+
+  // Check if a triangle is inside a selection rectangle
+  const isTriangleInRect = useCallback((t: RenderedTriangle, minX: number, maxX: number, minY: number, maxY: number): boolean => {
+    // Check if centroid is inside rectangle
+    const cx = (t.p1.x + t.p2.x + t.p3.x) / 3;
+    const cy = (t.p1.y + t.p2.y + t.p3.y) / 3;
+    return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
+  }, []);
+
+  // Check if a standalone edge is inside a selection rectangle
+  const isEdgeInRect = useCallback((e: StandaloneEdge, minX: number, maxX: number, minY: number, maxY: number): boolean => {
+    const cx = (e.p1.x + e.p2.x) / 2;
+    const cy = (e.p1.y + e.p2.y) / 2;
+    return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
+  }, []);
+
+  const handleMouseUp = () => {
+    cancelLongPress();
+
+    // Handle MOVING_SELECTION completion
+    if (interaction.type === 'MOVING_SELECTION') {
+      const { startWorld, currentWorld, targetIds } = interaction;
+      const dx = currentWorld.x - startWorld.x;
+      const dy = currentWorld.y - startWorld.y;
+
+      addLog(`MOVE: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
+
+      // Only move if there's actual displacement
+      if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+        const triangleIds: string[] = [];
+        const edgeIds: string[] = [];
+
+        targetIds.forEach(id => {
+          if (triangles.find(t => t.id === id)) {
+            triangleIds.push(id);
+          } else if (standaloneEdges.find(e => e.id === id)) {
+            edgeIds.push(id);
+          }
+        });
+
+        addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
+
+        if (triangleIds.length > 0 && onMoveTriangles) {
+          addLog(`Calling onMoveTriangles`);
+          onMoveTriangles(triangleIds, dx, dy);
+        }
+        if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+          addLog(`Calling onMoveStandaloneEdges`);
+          onMoveStandaloneEdges(edgeIds, dx, dy);
+        }
+      } else {
+        addLog(`MOVE: displacement too small`);
+      }
+
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    // Handle SELECT_RECT completion
+    if (interaction.type === 'SELECT_RECT') {
+      const { startWorld, currentWorld } = interaction;
+      const minX = Math.min(startWorld.x, currentWorld.x);
+      const maxX = Math.max(startWorld.x, currentWorld.x);
+      const minY = Math.min(startWorld.y, currentWorld.y);
+      const maxY = Math.max(startWorld.y, currentWorld.y);
+
+      // Only select if rectangle is big enough
+      if (Math.abs(maxX - minX) > 0.1 || Math.abs(maxY - minY) > 0.1) {
+        const newSelection = new Set<string>();
+
+        // Find triangles inside rectangle
+        triangles.forEach(t => {
+          if (isTriangleInRect(t, minX, maxX, minY, maxY)) {
+            newSelection.add(t.id);
+          }
+        });
+
+        // Find standalone edges inside rectangle
+        standaloneEdges.forEach(e => {
+          if (isEdgeInRect(e, minX, maxX, minY, maxY)) {
+            newSelection.add(e.id);
+          }
+        });
+
+        setSelectedIds(newSelection);
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
+    if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
+        interaction.type === 'ROOT_PLACING_ANGLE' ||
+        interaction.type === 'PHANTOM_PLACING' ||
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
+        interaction.type === 'EXTENDING_EDGE') {
+      return;
+    }
+
+    if (interaction.type === 'EDGE_READY') {
+      // Single click on edge - select the edge only (no triangle creation)
+      onEdgeSelect(interaction.tId, interaction.index);
+    } else if (interaction.type === 'PAN_READY') {
+      if (onBackgroundClick) {
+        onBackgroundClick();
+      }
+      // Clear multi-selection on background click
+      setSelectedIds(new Set());
+    }
+    setInteraction({ type: 'IDLE' });
+  };
+
+  const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
+    e.evt.preventDefault();
+    e.evt.stopPropagation();
+
+    if (!stageRef.current) return;
+
+    const stage = stageRef.current;
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    const zoomSensitivity = 0.002;
+    const delta = e.evt.deltaY;
+    const scaleBy = 1 - delta * zoomSensitivity;
+    const newScale = Math.max(0.1, Math.min(5, oldScale * scaleBy));
+
+    // Limit zoom (already applied above)
+
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+
+    setStageScale(newScale);
+    setStagePosition(newPos);
+  };
+
+  const handleZoomBtn = (direction: 'in' | 'out') => {
+    if (!stageRef.current) return;
+    
+    const stage = stageRef.current;
+    const oldScale = stage.scaleX();
+    const center = {
+      x: stageSize.width / 2,
+      y: stageSize.height / 2,
+    };
+
+    const mousePointTo = {
+      x: (center.x - stage.x()) / oldScale,
+      y: (center.y - stage.y()) / oldScale,
+    };
+
+    const scaleBy = direction === 'in' ? 1.25 : 0.8;
+    const newScale = oldScale * scaleBy;
+
+    if (newScale < 0.1 || newScale > 5) return;
+
+    const newPos = {
+      x: center.x - mousePointTo.x * newScale,
+      y: center.y - mousePointTo.y * newScale,
+    };
+
+    setStageScale(newScale);
+    setStagePosition(newPos);
+  };
+
+  const handleFitView = () => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const scaleX = rect.width / 1000;
+    const scaleY = rect.height / 800;
+    const initialScale = Math.min(scaleX, scaleY) * 0.9;
+    setStageScale(initialScale);
+    
+    const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+    const centerY = rect.height / 2 - (800 * initialScale) / 2;
+    setStagePosition({ x: centerX, y: centerY });
+  };
+
+  const handleLabelClick = (tId: string, index: 0 | 1 | 2, currentLen: number, label: string, labelX: number, labelY: number, angle: number, fontSize: number) => {
+    if (label === 'Ref') return;
+    setEditingDim({ tId, index, value: currentLen.toFixed(2), originalValue: currentLen, label: label || '' });
+    setEditingEdgeDim(null); // Clear edge editing if any
+
+    // Convert Konva stage coordinates to HTML screen coordinates
+    if (stageRef.current && containerRef.current) {
+      const stage = stageRef.current;
+      const containerRect = containerRef.current.getBoundingClientRect();
+
+      // Get the actual screen position of the label
+      const stageX = (labelX * stage.scaleX()) + stage.x();
+      const stageY = (labelY * stage.scaleY()) + stage.y();
+
+      setEditingInputPos({
+        x: containerRect.left + stageX,
+        y: containerRect.top + stageY,
+        angle,
+        fontSize: fontSize * stage.scaleX() // Scale font size to match zoom
+      });
+    }
+  };
+
+  const handleEdgeLabelClick = (edgeId: string, currentLen: number, labelX: number, labelY: number, fontSize: number) => {
+    setEditingEdgeDim({ edgeId, value: currentLen.toFixed(2), originalValue: currentLen });
+    setEditingDim(null); // Clear triangle dim editing if any
+
+    // Convert Konva stage coordinates to HTML screen coordinates
+    if (stageRef.current && containerRef.current) {
+      const stage = stageRef.current;
+      const containerRect = containerRef.current.getBoundingClientRect();
+
+      const stageX = (labelX * stage.scaleX()) + stage.x();
+      const stageY = (labelY * stage.scaleY()) + stage.y();
+
+      setEditingInputPos({
+        x: containerRect.left + stageX,
+        y: containerRect.top + stageY,
+        angle: 0,
+        fontSize: fontSize * stage.scaleX()
+      });
+    }
+  };
+
+  const commitEdit = () => {
+    // Handle triangle dimension edit
+    if (editingDim && onDimensionChange) {
+      const val = parseFloat(editingDim.value);
+      if (!isNaN(val) && val > 0) {
+        onDimensionChange(editingDim.tId, editingDim.index, val);
+      }
+      setEditingDim(null);
+      setEditingInputPos(null);
+      return;
+    }
+
+    // Handle standalone edge dimension edit
+    if (editingEdgeDim && onUpdateStandaloneEdgeLength) {
+      const val = parseFloat(editingEdgeDim.value);
+      if (!isNaN(val) && val > 0) {
+        onUpdateStandaloneEdgeLength(editingEdgeDim.edgeId, val);
+      }
+      setEditingEdgeDim(null);
+      setEditingInputPos(null);
+      return;
+    }
+
+    setEditingDim(null);
+    setEditingEdgeDim(null);
+    setEditingInputPos(null);
+  };
+
+  // Render Grid with background rect for double-click handling
+  const renderGrid = () => {
+    const step = 1;
+    const startX = Math.floor(worldBounds.x / step) * step;
+    const startY = Math.floor(worldBounds.y / step) * step;
+    const endX = worldBounds.x + worldBounds.w;
+    const endY = worldBounds.y + worldBounds.h;
+
+    const topLeft = worldToStage(worldBounds.x, worldBounds.y);
+    const bottomRight = worldToStage(endX, endY);
+
+    const elements = [];
+
+    // Background rect for catching double-clicks on empty areas
+    elements.push(
+      <Rect
+        key="background-rect"
+        name="background-rect"
+        x={topLeft.x}
+        y={topLeft.y}
+        width={bottomRight.x - topLeft.x}
+        height={bottomRight.y - topLeft.y}
+        fill="transparent"
+        onDblClick={handleBackgroundDblClick}
+      />
+    );
+
+    for (let x = startX; x <= endX; x += step) {
+      const sp1 = worldToStage(x, worldBounds.y);
+      const sp2 = worldToStage(x, endY);
+      const isMajor = Math.abs(x % (step * 5)) < 0.001 || Math.abs(x) < 0.001;
+      elements.push(
+        <Line
+          key={`v${x}`}
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={x === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
+          strokeWidth={x === 0 ? 2 : 1}
+        />
+      );
+    }
+    for (let y = startY; y <= endY; y += step) {
+      const sp1 = worldToStage(worldBounds.x, y);
+      const sp2 = worldToStage(endX, y);
+      const isMajor = Math.abs(y % (step * 5)) < 0.001 || Math.abs(y) < 0.001;
+      elements.push(
+        <Line
+          key={`h${y}`}
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={y === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
+          strokeWidth={y === 0 ? 2 : 1}
+        />
+      );
+    }
+    return elements;
+  };
+
+  // Render Edge with label
+  const renderEdge = (
+    t: RenderedTriangle,
+    pStart: Point,
+    pEnd: Point,
+    index: 0 | 1 | 2
+  ) => {
+    const isSelectedEdge = selectedEdge?.triangleId === t.id && selectedEdge?.edgeIndex === index;
+    const isOccupied = occupiedEdges?.has(`${t.id}-${index}`) || false;
+    const rawLen = distance(pStart, pEnd);
+    const len = rawLen.toFixed(2);
+
+    const sp1 = worldToStage(pStart.x, pStart.y);
+    const sp2 = worldToStage(pEnd.x, pEnd.y);
+
+    const midX = (pStart.x + pEnd.x) / 2;
+    const midY = (pStart.y + pEnd.y) / 2;
+
+    const labelPos = worldToStage(midX, midY);
+    const edgeLabel = t.edgeLabels ? t.edgeLabels[index] : '';
+    const isEditing = editingDim?.tId === t.id && editingDim?.index === index;
+
+    // Calculate angle for label rotation
+    const dx = pEnd.x - pStart.x;
+    const dy = pEnd.y - pStart.y;
+    let angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    if (angle > 90 || angle < -90) {
+      angle += 180;
+    }
+
+    // Calculate font size based on world-to-screen scale
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+
+    // Calculate text for label
+    const labelText = len;
+
+    // Estimate text width (monospace: ~0.6 * fontSize per character)
+    const charWidth = fontSize * 0.6;
+    const labelWidth = labelText.length * charWidth;
+
+    return (
+      <Group key={`edge-${t.id}-${index}`}>
+        {/* Hit Area & Drag Trigger - skip for Ref edges to not block parent's label */}
+        {edgeLabel !== 'Ref' && (
+          <Line
+            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+            stroke="transparent"
+            strokeWidth={20}
+            onClick={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              // Allow edge selection even if occupied (for highlight)
+              onEdgeSelect(t.id, index);
+            }}
+            onMouseDown={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
+              }
+            }}
+            onDblClick={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                // Enter phantom placing mode
+                const currentMouse = getWorldPoint(e);
+                setInteraction({
+                  type: 'PHANTOM_PLACING',
+                  tId: t.id,
+                  index,
+                  p1: pStart,
+                  p2: pEnd,
+                  currentMouse
+                });
+              }
+            }}
+          />
+        )}
+        {/* Visible Edge */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="rgba(0,0,0,0.2)"
+          strokeWidth={1}
+          dash={[8, 8]}
+        />
+        {/* Label - skip rendering for Ref edges (child's shared edge) to avoid duplicate */}
+        {edgeLabel !== 'Ref' && !isEditing ? (
+          <Group x={labelPos.x} y={labelPos.y} rotation={angle}>
+            <Text
+              x={0}
+              y={0}
+              text={labelText}
+              fontSize={fontSize}
+              fontFamily="monospace"
+              fontStyle="bold"
+              fill="#64748b"
+              fillAfterStrokeEnabled={true}
+              stroke="white"
+              strokeWidth={3}
+              offsetX={labelWidth / 2}
+              offsetY={fontSize / 2}
+              onClick={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
+            />
+          </Group>
+        ) : null}
+      </Group>
+    );
+  };
+
+  // Render Triangle Fill only (for bottom layer)
+  const renderTriangleFill = (t: RenderedTriangle) => {
+    const isSelected = selectedTriangleId === t.id;
+    const isMultiSelected = selectedIds.has(t.id);
+    const isEditingAnyEdge = editingDim?.tId === t.id;
+
+    const sp1 = worldToStage(t.p1.x, t.p1.y);
+    const sp2 = worldToStage(t.p2.x, t.p2.y);
+    const sp3 = worldToStage(t.p3.x, t.p3.y);
+
+    return (
+      <Shape
+        key={`fill-${t.id}`}
+        sceneFunc={(context, shape) => {
+          context.beginPath();
+          context.moveTo(sp1.x, sp1.y);
+          context.lineTo(sp2.x, sp2.y);
+          context.lineTo(sp3.x, sp3.y);
+          context.closePath();
+          context.fillStrokeShape(shape);
+        }}
+        fill={isMultiSelected ? "#3b82f6" : "#94a3b8"}
+        opacity={isMultiSelected ? 0.4 : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
+        stroke={isMultiSelected ? "#2563eb" : "#64748b"}
+        strokeWidth={isSelected || isMultiSelected ? 2 : 1}
+        onMouseDown={(e) => {
+          if (e.evt.button === 0) {
+            startEntityLongPress('triangle', t.id, e.evt.clientX, e.evt.clientY);
+          }
+        }}
+        onMouseUp={() => {
+          cancelLongPress();
+        }}
+        onMouseLeave={() => {
+          cancelLongPress();
+        }}
+        onClick={() => {
+          cancelLongPress();
+          onSelectTriangle(t.id);
+        }}
+        onContextMenu={(e) => {
+          e.evt.preventDefault();
+          handleContextMenu(e, 'triangle', t.id);
+        }}
+      />
+    );
+  };
+
+  // Render a vertex marker (for extending edges from triangle vertices)
+  const renderVertexMarker = (point: Point, triangleId: string) => {
+    const sp = worldToStage(point.x, point.y);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const radius = Math.max(4, 0.4 * uiScale);
+
+    return (
+      <Circle
+        key={`vertex-${triangleId}-${point.id}`}
+        x={sp.x}
+        y={sp.y}
+        radius={radius}
+        fill="#64748b"
+        stroke="white"
+        strokeWidth={1}
+        opacity={0.7}
+        onDblClick={(e) => {
+          e.evt.stopPropagation();
+          // Start extending edge from this vertex
+          setInteraction({
+            type: 'EXTENDING_EDGE',
+            fromEdgeId: triangleId, // Using triangle ID as reference
+            fromPoint: point,
+            currentMouse: point
+          });
+        }}
+      />
+    );
+  };
+
+  // Render Triangle Labels (edges and centroid label) - for top layer
+  const renderTriangleLabels = (t: RenderedTriangle) => {
+    const centroid = getCentroid(t);
+    const labelPos = worldToStage(centroid.x, centroid.y);
+
+    // Calculate font size based on world-to-screen scale
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(10, 1.2 * uiScale);
+
+    return (
+      <Group key={`labels-${t.id}`}>
+        {/* Edges */}
+        {renderEdge(t, t.p1, t.p2, 0)}
+        {renderEdge(t, t.p2, t.p3, 1)}
+        {renderEdge(t, t.p3, t.p1, 2)}
+        {/* Vertex markers for extending edges */}
+        {renderVertexMarker(t.p1, t.id)}
+        {renderVertexMarker(t.p2, t.id)}
+        {renderVertexMarker(t.p3, t.id)}
+        {/* Triangle Number in Circle */}
+        <Group
+          x={labelPos.x}
+          y={labelPos.y}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Enter vertex reshaping mode
+            setInteraction({
+              type: 'VERTEX_RESHAPING',
+              tId: t.id,
+              p1: t.p1,
+              p2: t.p2,
+              currentMouse: t.p3
+            });
+          }}
+        >
+          <Circle
+            x={0}
+            y={0}
+            radius={fontSize * 0.7}
+            fill={selectedTriangleId === t.id ? "#fef08a" : "white"}
+            stroke={selectedTriangleId === t.id ? "#facc15" : "#3b82f6"}
+            strokeWidth={selectedTriangleId === t.id ? 3 : 2}
+            opacity={0.9}
+          />
+          <Text
+            x={0}
+            y={0}
+            text={t.name.replace(/\D/g, '')}
+            fontSize={fontSize * 0.8}
+            fontStyle="bold"
+            fill={selectedTriangleId === t.id ? "#ca8a04" : "#3b82f6"}
+            offsetX={t.name.replace(/\D/g, '').length * fontSize * 0.24}
+            offsetY={fontSize * 0.4}
+          />
+        </Group>
+      </Group>
+    );
+  };
+
+  // Render selected edge highlight (separate layer for visibility)
+  const renderSelectedEdgeHighlight = () => {
+    if (!selectedEdge) return null;
+
+    const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
+    if (!t) return null;
+
+    let p1: Point, p2: Point;
+    if (selectedEdge.edgeIndex === 0) {
+      p1 = t.p1; p2 = t.p2;
+    } else if (selectedEdge.edgeIndex === 1) {
+      p1 = t.p2; p2 = t.p3;
+    } else {
+      p1 = t.p3; p2 = t.p1;
+    }
+
+    const sp1 = worldToStage(p1.x, p1.y);
+    const sp2 = worldToStage(p2.x, p2.y);
+
+    return (
+      <Group key="selected-edge-highlight">
+        {/* Outer glow */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#fde047"
+          strokeWidth={12}
+          lineCap="round"
+          opacity={0.6}
+        />
+        {/* Inner highlight */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#facc15"
+          strokeWidth={6}
+          lineCap="round"
+        />
+      </Group>
+    );
+  };
+
+  // Render standalone edges
+  const renderStandaloneEdge = (edge: StandaloneEdge) => {
+    const sp1 = worldToStage(edge.p1.x, edge.p1.y);
+    const sp2 = worldToStage(edge.p2.x, edge.p2.y);
+    const midX = (sp1.x + sp2.x) / 2;
+    const midY = (sp1.y + sp2.y) / 2;
+
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const lenText = edge.length.toFixed(2);
+    const charWidth = fontSize * 0.6;
+    const textWidth = lenText.length * charWidth;
+    const endpointRadius = Math.max(4, fontSize * 0.4);
+
+    const isMultiSelected = selectedIds.has(edge.id);
+
+    return (
+      <Group key={`standalone-${edge.id}`}>
+        {/* Hit area for double-click on edge body (to create triangle) and long press for context menu */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="transparent"
+          strokeWidth={20}
+          onMouseDown={(e) => {
+            if (e.evt.button === 0) {
+              startEntityLongPress('edge', edge.id, e.evt.clientX, e.evt.clientY);
+            }
+          }}
+          onMouseUp={() => {
+            cancelLongPress();
+          }}
+          onMouseLeave={() => {
+            cancelLongPress();
+          }}
+          onDblClick={(e) => {
+            cancelLongPress();
+            e.evt.stopPropagation();
+            // Enter triangle placing mode from this edge
+            setInteraction({
+              type: 'STANDALONE_EDGE_PLACING',
+              edgeId: edge.id,
+              p1: edge.p1,
+              p2: edge.p2,
+              currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
+            });
+          }}
+          onContextMenu={(e) => {
+            e.evt.preventDefault();
+            handleContextMenu(e, 'edge', edge.id);
+          }}
+        />
+        {/* Visible edge */}
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke={isMultiSelected ? "#2563eb" : "#3b82f6"}
+          strokeWidth={isMultiSelected ? 3 : 2}
+        />
+        {/* Endpoint 1 - double-click to extend */}
+        <Circle
+          x={sp1.x}
+          y={sp1.y}
+          radius={endpointRadius}
+          fill="#3b82f6"
+          stroke="white"
+          strokeWidth={2}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p1,
+              currentMouse: edge.p1
+            });
+          }}
+        />
+        {/* Endpoint 2 - double-click to extend */}
+        <Circle
+          x={sp2.x}
+          y={sp2.y}
+          radius={endpointRadius}
+          fill="#3b82f6"
+          stroke="white"
+          strokeWidth={2}
+          onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p2,
+              currentMouse: edge.p2
+            });
+          }}
+        />
+        {/* Length label - clickable to edit */}
+        {editingEdgeDim?.edgeId !== edge.id && (
+          <Text
+            x={midX}
+            y={midY}
+            text={lenText}
+            fontSize={fontSize}
+            fontFamily="monospace"
+            fontStyle="bold"
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={3}
+            offsetX={textWidth / 2}
+            offsetY={fontSize / 2 + fontSize}
+            onClick={() => handleEdgeLabelClick(edge.id, edge.length, midX, midY - fontSize, fontSize)}
+          />
+        )}
+      </Group>
+    );
+  };
+
+  // Render edge drawing ghost (for both new edge and extending edge)
+  const renderEdgeDrawingGhost = () => {
+    let startPoint: Point, currentMouse: Point;
+
+    if (interaction.type === 'DRAWING_EDGE') {
+      startPoint = interaction.startPoint;
+      currentMouse = interaction.currentMouse;
+    } else if (interaction.type === 'EXTENDING_EDGE') {
+      startPoint = interaction.fromPoint;
+      currentMouse = interaction.currentMouse;
+    } else {
+      return null;
+    }
+
+    // Apply snap for visual feedback
+    const snappedMouse = applySnap(currentMouse, [startPoint]);
+    const isSnapping = snappedMouse !== currentMouse;
+
+    const sp1 = worldToStage(startPoint.x, startPoint.y);
+    const sp2 = worldToStage(snappedMouse.x, snappedMouse.y);
+    const len = distance(startPoint, snappedMouse).toFixed(2);
+
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const charWidth = fontSize * 0.6;
+    const textWidth = len.length * charWidth;
+    const snapRadius = Math.max(6, fontSize * 0.5);
+
+    return (
+      <Group>
+        <Line
+          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+          stroke="#3b82f6"
+          strokeWidth={2}
+          dash={[4, 4]}
+        />
+        {/* Snap indicator */}
+        {isSnapping && (
+          <Circle
+            x={sp2.x}
+            y={sp2.y}
+            radius={snapRadius}
+            fill="transparent"
+            stroke="#22c55e"
+            strokeWidth={2}
+          />
+        )}
+        <Text
+          x={(sp1.x + sp2.x) / 2}
+          y={(sp1.y + sp2.y) / 2}
+          text={len}
+          fontSize={fontSize}
+          fill="#3b82f6"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={textWidth / 2}
+          offsetY={fontSize / 2}
+        />
+      </Group>
+    );
+  };
+
+  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, VERTEX_RESHAPING, STANDALONE_EDGE_PLACING)
+  const renderDragGhost = () => {
+    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING' && interaction.type !== 'STANDALONE_EDGE_PLACING') return null;
+    const { p1, p2, currentMouse } = interaction;
+
+    // Apply snap for visual feedback (exclude base edge points)
+    const snappedMouse = applySnap(currentMouse, [p1, p2]);
+    const isSnapping = snappedMouse !== currentMouse;
+
+    const sp1 = worldToStage(p1.x, p1.y);
+    const sp2 = worldToStage(p2.x, p2.y);
+    const sp3 = worldToStage(snappedMouse.x, snappedMouse.y);
+
+    const sL = distance(p1, snappedMouse).toFixed(2);
+    const sR = distance(p2, snappedMouse).toFixed(2);
+
+    // Calculate font size based on world-to-screen scale
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const snapRadius = Math.max(6, fontSize * 0.5);
+
+    // Estimate text width (monospace: ~0.6 * fontSize per character)
+    const charWidth = fontSize * 0.6;
+    const textB = `B: ${sL}`;
+    const textC = `C: ${sR}`;
+    const widthB = textB.length * charWidth;
+    const widthC = textC.length * charWidth;
+
+    return (
+      <Group>
+        <Shape
+          sceneFunc={(context, shape) => {
+            context.beginPath();
+            context.moveTo(sp1.x, sp1.y);
+            context.lineTo(sp2.x, sp2.y);
+            context.lineTo(sp3.x, sp3.y);
+            context.closePath();
+            context.fillStrokeShape(shape);
+          }}
+          fill="#94a3b8"
+          opacity={0.2}
+          stroke="#94a3b8"
+          strokeWidth={1}
+          dash={[4, 4]}
+        />
+        <Line points={[sp1.x, sp1.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
+        <Line points={[sp2.x, sp2.y, sp3.x, sp3.y]} stroke="#64748b" strokeWidth={1} />
+
+        {/* Snap indicator */}
+        {isSnapping && (
+          <Circle
+            x={sp3.x}
+            y={sp3.y}
+            radius={snapRadius}
+            fill="transparent"
+            stroke="#22c55e"
+            strokeWidth={2}
+          />
+        )}
+
+        <Text
+          x={(sp1.x + sp3.x) / 2}
+          y={(sp1.y + sp3.y) / 2}
+          text={textB}
+          fontSize={fontSize}
+          fill="#64748b"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={widthB / 2}
+          offsetY={fontSize / 2}
+        />
+        <Text
+          x={(sp2.x + sp3.x) / 2}
+          y={(sp2.y + sp3.y) / 2}
+          text={textC}
+          fontSize={fontSize}
+          fill="#64748b"
+          fillAfterStrokeEnabled={true}
+          stroke="white"
+          strokeWidth={2}
+          offsetX={widthC / 2}
+          offsetY={fontSize / 2}
+        />
+      </Group>
+    );
+  };
+
+  // Render root triangle placement preview
+  const renderRootPlacingPreview = () => {
+    if (interaction.type !== 'ROOT_PLACING_ORIGIN' && interaction.type !== 'ROOT_PLACING_ANGLE') return null;
+
+    const { sideA, sideB, sideC, currentMouse } = interaction;
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
+    const fontSize = Math.max(8, 0.8 * uiScale);
+    const snapRadius = Math.max(6, fontSize * 0.5);
+
+    // In ORIGIN mode, just show cursor indicator
+    if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+      const snappedMouse = applySnap(currentMouse, []);
+      const isSnapping = snappedMouse !== currentMouse;
+      const sp = worldToStage(snappedMouse.x, snappedMouse.y);
+
+      return (
+        <Group>
+          {/* Origin cursor indicator */}
+          <Circle
+            x={sp.x}
+            y={sp.y}
+            radius={snapRadius * 1.5}
+            fill="#3b82f6"
+            opacity={0.5}
+          />
+          {isSnapping && (
+            <Circle
+              x={sp.x}
+              y={sp.y}
+              radius={snapRadius * 2}
+              fill="transparent"
+              stroke="#22c55e"
+              strokeWidth={2}
+            />
+          )}
+          <Text
+            x={sp.x}
+            y={sp.y + snapRadius * 3}
+            text="Click to set origin"
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 5}
+          />
+        </Group>
+      );
+    }
+
+    // In ANGLE mode, show triangle preview
+    if (interaction.type === 'ROOT_PLACING_ANGLE') {
+      const { origin } = interaction;
+
+      // Calculate p2 position based on currentMouse direction
+      const dx = currentMouse.x - origin.x;
+      const dy = currentMouse.y - origin.y;
+      const angle = Math.atan2(dy, dx);
+
+      // p2 is at distance sideA from origin in the direction of angle
+      const p1 = origin;
+      const p2: Point = {
+        id: 'p2',
+        x: origin.x + sideA * Math.cos(angle),
+        y: origin.y + sideA * Math.sin(angle)
+      };
+
+      // Use the SAME function as recalculateGeometry
+      // recalculateGeometry calls: calculateThirdPoint(p1, p2, sb, sc, !def.flip)
+      // def.flip defaults to false/undefined, so !def.flip = true
+      const p3 = calculateThirdPoint(p1, p2, sideB, sideC, true);
+
+      if (!p3) {
+        return null;
+      }
+
+      const sp1 = worldToStage(p1.x, p1.y);
+      const sp2 = worldToStage(p2.x, p2.y);
+      const sp3 = worldToStage(p3.x, p3.y);
+
+      // Also show angle line from origin to current mouse
+      const smouse = worldToStage(currentMouse.x, currentMouse.y);
+
+      return (
+        <Group>
+          {/* Direction line (faint) */}
+          <Line
+            points={[sp1.x, sp1.y, smouse.x, smouse.y]}
+            stroke="#3b82f6"
+            strokeWidth={1}
+            dash={[4, 4]}
+            opacity={0.5}
+          />
+          {/* Triangle preview */}
+          <Shape
+            sceneFunc={(context, shape) => {
+              context.beginPath();
+              context.moveTo(sp1.x, sp1.y);
+              context.lineTo(sp2.x, sp2.y);
+              context.lineTo(sp3.x, sp3.y);
+              context.closePath();
+              context.fillStrokeShape(shape);
+            }}
+            fill="#3b82f6"
+            opacity={0.2}
+            stroke="#3b82f6"
+            strokeWidth={2}
+          />
+          {/* Side labels */}
+          <Text
+            x={(sp1.x + sp2.x) / 2}
+            y={(sp1.y + sp2.y) / 2}
+            text={`A: ${sideA}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={fontSize}
+          />
+          <Text
+            x={(sp1.x + sp3.x) / 2}
+            y={(sp1.y + sp3.y) / 2}
+            text={`B: ${sideB}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={-fontSize * 0.5}
+          />
+          <Text
+            x={(sp2.x + sp3.x) / 2}
+            y={(sp2.y + sp3.y) / 2}
+            text={`C: ${sideC}`}
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 2}
+            offsetY={-fontSize * 0.5}
+          />
+          {/* Instruction */}
+          <Text
+            x={sp1.x}
+            y={sp1.y + snapRadius * 4}
+            text="Click to place triangle"
+            fontSize={fontSize}
+            fill="#3b82f6"
+            fillAfterStrokeEnabled={true}
+            stroke="white"
+            strokeWidth={2}
+            offsetX={fontSize * 5.5}
+          />
+        </Group>
+      );
+    }
+
+    return null;
+  };
+
+  // Render moving selection preview
+  const renderMovingPreview = () => {
+    if (interaction.type !== 'MOVING_SELECTION') return null;
+
+    const { startWorld, currentWorld, targetIds } = interaction;
+    const dx = currentWorld.x - startWorld.x;
+    const dy = currentWorld.y - startWorld.y;
+
+    const elements: React.ReactElement[] = [];
+
+    // Draw ghost triangles
+    targetIds.forEach(id => {
+      const t = triangles.find(tri => tri.id === id);
+      if (t) {
+        const sp1 = worldToStage(t.p1.x + dx, t.p1.y + dy);
+        const sp2 = worldToStage(t.p2.x + dx, t.p2.y + dy);
+        const sp3 = worldToStage(t.p3.x + dx, t.p3.y + dy);
+
+        elements.push(
+          <Shape
+            key={`moving-${t.id}`}
+            sceneFunc={(context, shape) => {
+              context.beginPath();
+              context.moveTo(sp1.x, sp1.y);
+              context.lineTo(sp2.x, sp2.y);
+              context.lineTo(sp3.x, sp3.y);
+              context.closePath();
+              context.fillStrokeShape(shape);
+            }}
+            fill="#3b82f6"
+            opacity={0.3}
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dash={[4, 4]}
+          />
+        );
+      }
+
+      const edge = standaloneEdges.find(e => e.id === id);
+      if (edge) {
+        const sp1 = worldToStage(edge.p1.x + dx, edge.p1.y + dy);
+        const sp2 = worldToStage(edge.p2.x + dx, edge.p2.y + dy);
+
+        elements.push(
+          <Line
+            key={`moving-edge-${edge.id}`}
+            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dash={[4, 4]}
+            opacity={0.6}
+          />
+        );
+      }
+    });
+
+    return <Group>{elements}</Group>;
+  };
+
+  // Render selection rectangle
+  const renderSelectRect = () => {
+    if (interaction.type !== 'SELECT_RECT') return null;
+
+    const { startWorld, currentWorld } = interaction;
+    const sp1 = worldToStage(startWorld.x, startWorld.y);
+    const sp2 = worldToStage(currentWorld.x, currentWorld.y);
+
+    const x = Math.min(sp1.x, sp2.x);
+    const y = Math.min(sp1.y, sp2.y);
+    const width = Math.abs(sp2.x - sp1.x);
+    const height = Math.abs(sp2.y - sp1.y);
+
+    return (
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="#3b82f6"
+        opacity={0.2}
+        stroke="#3b82f6"
+        strokeWidth={1}
+        dash={[4, 4]}
+      />
+    );
+  };
+
+  const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING'
+    ? 'grabbing'
+    : interaction.type === 'MOVING_SELECTION'
+    ? 'move'
+    : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE' || interaction.type === 'SELECT_RECT')
+    ? 'crosshair'
+    : 'default';
+
+  return (
+    <div ref={containerRef} className="flex-1 h-full relative bg-slate-100 overflow-hidden select-none">
+      <Stage
+        ref={stageRef}
+        width={stageSize.width}
+        height={stageSize.height}
+        scaleX={stageScale}
+        scaleY={stageScale}
+        x={stagePosition.x}
+        y={stagePosition.y}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onWheel={handleWheel}
+        style={{ cursor: cursorStyle }}
+      >
+        <Layer>
+          {renderGrid()}
+          {/* Render standalone edges */}
+          {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
+          {/* Render all triangle fills first (bottom layer) */}
+          {triangles.map((t) => renderTriangleFill(t))}
+          {/* Render selected edge highlight (above fills, below labels) */}
+          {renderSelectedEdgeHighlight()}
+          {/* Render all labels on top (so they're clickable) */}
+          {triangles.map((t) => renderTriangleLabels(t))}
+          {renderEdgeDrawingGhost()}
+          {renderDragGhost()}
+          {renderRootPlacingPreview()}
+          {renderSelectRect()}
+          {renderMovingPreview()}
+        </Layer>
+      </Stage>
+
+      <div className="absolute bottom-6 right-6 flex flex-col gap-2">
+        <button
+          onClick={() => handleZoomBtn('in')}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+        >
+          <ZoomIn size={20} />
+        </button>
+        <button
+          onClick={() => handleZoomBtn('out')}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+        >
+          <ZoomOut size={20} />
+        </button>
+        <button
+          onClick={handleFitView}
+          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
+          title="Reset View"
+        >
+          <Maximize size={20} />
+        </button>
+      </div>
+
+      <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
+        <p className="font-semibold mb-1">操作方法:</p>
+        <p>• <span className="text-blue-600 font-bold">辺ダブルクリック</span>: 三角形を追加</p>
+        <p>• <span className="text-blue-600 font-bold">寸法クリック</span>: 数値を編集</p>
+        <p>• <span className="text-amber-600 font-bold">番号ダブルクリック</span>: 頂点を移動</p>
+        <p>• <span className="text-slate-600 font-bold">長押し</span>: 削除</p>
+        <p>• スクロール: ズーム / ドラッグ: パン</p>
+      </div>
+
+      {/* HTML Input overlay for editing triangle dimensions */}
+      {editingDim && editingInputPos && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `${editingInputPos.x}px`,
+            top: `${editingInputPos.y}px`,
+            transform: `translate(-50%, -50%) rotate(${editingInputPos.angle}deg)`,
+            fontSize: `${editingInputPos.fontSize}px`,
+            fontFamily: 'ui-monospace, monospace',
+            fontWeight: '600',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.2em',
+            zIndex: 1000
+          }}
+        >
+          {editingDim.label && (
+            <span style={{ color: '#64748b' }}>
+              {editingDim.label}:
+            </span>
+          )}
+          <input
+            type="text"
+            inputMode="decimal"
+            value={editingDim.value}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
+                setEditingDim({...editingDim, value: value});
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditingDim(null);
+                setEditingInputPos(null);
+              }
+            }}
+            onBlur={commitEdit}
+            autoFocus
+            style={{
+              fontSize: 'inherit',
+              fontFamily: 'inherit',
+              fontWeight: 'inherit',
+              textAlign: 'center',
+              border: 'none',
+              outline: 'none',
+              background: 'rgba(255,255,255,0.9)',
+              color: '#64748b',
+              padding: '0 0.2em',
+              margin: '0',
+              cursor: 'text',
+              width: 'auto',
+              minWidth: '3em',
+              borderRadius: '2px'
+            }}
+          />
+        </div>
+      )}
+
+      {/* HTML Input overlay for editing standalone edge dimensions */}
+      {editingEdgeDim && editingInputPos && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `${editingInputPos.x}px`,
+            top: `${editingInputPos.y}px`,
+            transform: 'translate(-50%, -50%)',
+            fontSize: `${editingInputPos.fontSize}px`,
+            fontFamily: 'ui-monospace, monospace',
+            fontWeight: '600',
+            zIndex: 1000
+          }}
+        >
+          <input
+            type="text"
+            inputMode="decimal"
+            value={editingEdgeDim.value}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
+                setEditingEdgeDim({...editingEdgeDim, value: value});
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditingEdgeDim(null);
+                setEditingInputPos(null);
+              }
+            }}
+            onBlur={commitEdit}
+            autoFocus
+            style={{
+              fontSize: 'inherit',
+              fontFamily: 'inherit',
+              fontWeight: 'inherit',
+              textAlign: 'center',
+              border: 'none',
+              outline: 'none',
+              background: 'rgba(255,255,255,0.9)',
+              color: '#3b82f6',
+              padding: '0 0.2em',
+              margin: '0',
+              cursor: 'text',
+              width: 'auto',
+              minWidth: '3em',
+              borderRadius: '2px'
+            }}
+          />
+        </div>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirm && (
+        <div
+          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
+          onClick={() => setDeleteConfirm(null)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4 border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center">
+                <span className="text-slate-600 text-xl">🗑</span>
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Delete {deleteConfirm.name}?</h3>
+                <p className="text-sm text-slate-500">This action cannot be undone</p>
+              </div>
+            </div>
+
+            {deleteConfirm.type === 'triangle' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3 mb-4">
+                <p className="text-sm text-amber-700">
+                  <strong>Note:</strong> All triangles connected to {deleteConfirm.name} will also be deleted.
+                </p>
+              </div>
+            )}
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Type <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">del</span> to confirm:
+              </label>
+              <input
+                type="text"
+                value={deleteInput}
+                onChange={(e) => setDeleteInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && deleteInput.toLowerCase() === 'del') {
+                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
+                      onDeleteTriangle(deleteConfirm.id);
+                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
+                      onDeleteStandaloneEdge(deleteConfirm.id);
+                    }
+                    setDeleteConfirm(null);
+                    setDeleteInput('');
+                  } else if (e.key === 'Escape') {
+                    setDeleteConfirm(null);
+                  }
+                }}
+                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
+                placeholder="del"
+                autoFocus
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 px-4 py-2 bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200 transition-colors font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (deleteInput.toLowerCase() === 'del') {
+                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
+                      onDeleteTriangle(deleteConfirm.id);
+                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
+                      onDeleteStandaloneEdge(deleteConfirm.id);
+                    }
+                    setDeleteConfirm(null);
+                    setDeleteInput('');
+                  }
+                }}
+                disabled={deleteInput.toLowerCase() !== 'del'}
+                className={`flex-1 px-4 py-2 rounded-md font-medium transition-colors ${
+                  deleteInput.toLowerCase() === 'del'
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                }`}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Debug Console */}
+      <div className="absolute bottom-0 left-0 right-0 h-24 bg-slate-900 text-green-400 font-mono text-xs overflow-y-auto border-t border-slate-700">
+        <div className="sticky top-0 bg-slate-800 px-2 py-1 flex justify-between items-center border-b border-slate-700">
+          <span className="text-slate-400">Debug: <span className="text-yellow-400">{interaction.type}</span> | Selected: <span className="text-cyan-400">{selectedIds.size}</span></span>
+          <button
+            onClick={() => setDebugLogs([])}
+            className="text-slate-500 hover:text-white px-2"
+          >
+            Clear
+          </button>
+        </div>
+        <div className="p-2 space-y-0.5">
+          {debugLogs.map((log, i) => (
+            <div key={i} className="whitespace-nowrap">{log}</div>
+          ))}
+          {debugLogs.length === 0 && <div className="text-slate-500">No logs...</div>}
+        </div>
+      </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50 min-w-32"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={() => setContextMenu(null)}
+        >
+          {/* Move option - only show if something is selected or targeting a specific entity */}
+          {((contextMenu.targetType === 'selection' && selectedIds.size > 0) ||
+            (contextMenu.targetType === 'triangle' && contextMenu.targetId) ||
+            (contextMenu.targetType === 'edge' && contextMenu.targetId)) && (
+            <button
+              className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-blue-600"
+              onClick={(e) => {
+                e.stopPropagation();
+
+                // Determine the IDs to move
+                let idsToMove: Set<string>;
+                if (contextMenu.targetType === 'triangle' && contextMenu.targetId) {
+                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
+                } else if (contextMenu.targetType === 'edge' && contextMenu.targetId) {
+                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
+                } else {
+                  idsToMove = selectedIds;
+                }
+
+                // Update selectedIds for visual feedback
+                setSelectedIds(idsToMove);
+
+                addLog(`Move clicked: idsToMove=${idsToMove.size}, ids=[${Array.from(idsToMove).join(',')}]`);
+
+                // Start moving mode - convert screen coordinates to world coordinates
+                const stage = stageRef.current;
+                const container = containerRef.current;
+                if (stage && container) {
+                  const containerRect = container.getBoundingClientRect();
+                  // Convert screen coordinates to stage-relative coordinates
+                  const stageRelativeX = contextMenu.x - containerRect.left;
+                  const stageRelativeY = contextMenu.y - containerRect.top;
+                  // Convert to internal stage coordinates
+                  const stageX = (stageRelativeX - stage.x()) / stage.scaleX();
+                  const stageY = (stageRelativeY - stage.y()) / stage.scaleY();
+                  const world = stageToWorld(stageX, stageY);
+                  const startWorld: Point = { id: generateId(), x: world.x, y: world.y };
+                  addLog(`Start MOVING_SELECTION: world=(${world.x.toFixed(2)}, ${world.y.toFixed(2)})`);
+                  // Store targetIds in interaction to avoid async state issues
+                  setInteraction({ type: 'MOVING_SELECTION', startWorld, currentWorld: startWorld, targetIds: idsToMove });
+                } else {
+                  addLog(`Move failed: stage=${!!stage}, container=${!!container}`);
+                }
+                setContextMenu(null);
+              }}
+            >
+              <span>✥</span>
+              <span>移動</span>
+            </button>
+          )}
+          {/* Delete option */}
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-red-600"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (contextMenu.targetType === 'triangle' && contextMenu.targetId && onDeleteTriangle) {
+                const t = triangles.find(tri => tri.id === contextMenu.targetId);
+                setDeleteConfirm({ type: 'triangle', id: contextMenu.targetId, name: t?.name || 'Triangle' });
+              } else if (contextMenu.targetType === 'edge' && contextMenu.targetId && onDeleteStandaloneEdge) {
+                setDeleteConfirm({ type: 'edge', id: contextMenu.targetId, name: 'Edge' });
+              } else if (contextMenu.targetType === 'selection' && selectedIds.size > 0) {
+                // Delete all selected items
+                selectedIds.forEach(id => {
+                  if (triangles.find(t => t.id === id)) {
+                    onDeleteTriangle?.(id);
+                  } else if (standaloneEdges.find(e => e.id === id)) {
+                    onDeleteStandaloneEdge?.(id);
+                  }
+                });
+                setSelectedIds(new Set());
+              }
+              setContextMenu(null);
+            }}
+          >
+            <span>🗑</span>
+            <span>削除</span>
+          </button>
+        </div>
+      )}
+
+      {/* Click outside to close context menu */}
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContextMenu(null);
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+export default GeometryCanvas;
+
+
+//===============================================================================
+// FILE: App.tsx
+//===============================================================================
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { RenderedTriangle, TriangleDef, ToolMode, StandaloneEdge, Point } from './types';
+import { generateId, recalculateGeometry, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
+import { PALETTE } from './constants';
+import GeometryCanvas from './components/GeometryCanvas';
+import { Calculator, RefreshCw, Download, Undo2 } from 'lucide-react';
+import { downloadDXF } from './utils/dxfExport';
+
+const App: React.FC = () => {
+  // State: The Definition is the source of truth
+  const [defs, setDefs] = useState<TriangleDef[]>(() => {
+    try {
+      const savedDefs = localStorage.getItem('geosolver_triangle_defs');
+      if (savedDefs) {
+        return JSON.parse(savedDefs);
+      }
+    } catch (e) {
+      console.error("Failed to load saved geometry:", e);
+    }
+    return [{
+      id: generateId(),
+      name: 'T1',
+      color: PALETTE[0],
+      isRoot: true,
+      sideA: 5,
+      sideB: 5,
+      sideC: 5
+    }];
+  });
+
+  // Derived State: Rendered geometry
+  const [geometry, setGeometry] = useState<{ points: any[], triangles: RenderedTriangle[] }>({ points: [], triangles: [] });
+
+  // Selection State
+  const [selectedTriangleId, setSelectedTriangleId] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<{ triangleId: string, edgeIndex: 0 | 1 | 2 } | null>(null);
+
+  // Standalone edges
+  const [standaloneEdges, setStandaloneEdges] = useState<StandaloneEdge[]>([]);
+
+  // Root triangle placement mode
+  const [rootPlacingMode, setRootPlacingMode] = useState<{ sideA: number; sideB: number; sideC: number } | null>(null);
+
+  // Undo history
+  const [history, setHistory] = useState<{ defs: TriangleDef[], edges: StandaloneEdge[] }[]>([]);
+  const isUndoing = useRef(false);
+  const MAX_HISTORY = 50;
+
+  // Save current state to history before making changes
+  const saveToHistory = useCallback(() => {
+    if (isUndoing.current) return;
+    setHistory(prev => {
+      const newHistory = [...prev, { defs: JSON.parse(JSON.stringify(defs)), edges: JSON.parse(JSON.stringify(standaloneEdges)) }];
+      if (newHistory.length > MAX_HISTORY) {
+        return newHistory.slice(-MAX_HISTORY);
+      }
+      return newHistory;
+    });
+  }, [defs, standaloneEdges]);
+
+  // Undo function
+  const handleUndo = useCallback(() => {
+    if (history.length === 0) return;
+
+    isUndoing.current = true;
+    const prevState = history[history.length - 1];
+    setDefs(prevState.defs);
+    setStandaloneEdges(prevState.edges);
+    setHistory(prev => prev.slice(0, -1));
+
+    setTimeout(() => {
+      isUndoing.current = false;
+    }, 0);
+  }, [history]);
+
+  // Keyboard shortcut for Undo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo]);
+
+  // Edge overlap check
+  const edgesOverlap = (edge: StandaloneEdge, p1: Point, p2: Point, tolerance: number = 0.1): boolean => {
+    const cross1 = (p2.x - p1.x) * (edge.p1.y - p1.y) - (p2.y - p1.y) * (edge.p1.x - p1.x);
+    const cross2 = (p2.x - p1.x) * (edge.p2.y - p1.y) - (p2.y - p1.y) * (edge.p2.x - p1.x);
+
+    const edgeLen = distance(p1, p2);
+    if (Math.abs(cross1) > tolerance * edgeLen || Math.abs(cross2) > tolerance * edgeLen) {
+      return false;
+    }
+
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq === 0) return false;
+
+    const t1 = ((edge.p1.x - p1.x) * dx + (edge.p1.y - p1.y) * dy) / lenSq;
+    const t2 = ((edge.p2.x - p1.x) * dx + (edge.p2.y - p1.y) * dy) / lenSq;
+
+    const proj1X = p1.x + t1 * dx;
+    const proj1Y = p1.y + t1 * dy;
+    const proj2X = p1.x + t2 * dx;
+    const proj2Y = p1.y + t2 * dy;
+
+    const dist1 = Math.sqrt((edge.p1.x - proj1X) ** 2 + (edge.p1.y - proj1Y) ** 2);
+    const dist2 = Math.sqrt((edge.p2.x - proj2X) ** 2 + (edge.p2.y - proj2Y) ** 2);
+
+    if (dist1 > tolerance || dist2 > tolerance) {
+      return false;
+    }
+
+    const minT = Math.min(t1, t2);
+    const maxT = Math.max(t1, t2);
+    const toleranceT = tolerance / Math.sqrt(lenSq);
+
+    return maxT >= -toleranceT && minT <= 1 + toleranceT;
+  };
+
+  // Garbage collect standalone edges
+  const garbageCollectEdges = (triangleList: RenderedTriangle[], edges: StandaloneEdge[]): StandaloneEdge[] => {
+    return edges.filter(edge => {
+      for (const t of triangleList) {
+        const triangleEdges: [Point, Point][] = [
+          [t.p1, t.p2],
+          [t.p2, t.p3],
+          [t.p3, t.p1]
+        ];
+
+        for (const [tp1, tp2] of triangleEdges) {
+          if (edgesOverlap(edge, tp1, tp2)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  };
+
+  // Persist to localStorage
+  useEffect(() => {
+    localStorage.setItem('geosolver_triangle_defs', JSON.stringify(defs));
+  }, [defs]);
+
+  // Re-calculate geometry
+  useEffect(() => {
+    const calculated = recalculateGeometry(defs);
+    setGeometry(calculated);
+
+    if (calculated.triangles.length > 0 && standaloneEdges.length > 0) {
+      const remainingEdges = garbageCollectEdges(calculated.triangles, standaloneEdges);
+      if (remainingEdges.length !== standaloneEdges.length) {
+        setStandaloneEdges(remainingEdges);
+      }
+    }
+  }, [defs]);
+
+  // Handle root triangle placement completion
+  const handleRootPlacingComplete = (origin: Point, angle: number) => {
+    if (!rootPlacingMode) return;
+
+    const { sideA, sideB, sideC } = rootPlacingMode;
+    const p2: Point = {
+      id: 'p2',
+      x: origin.x + sideA * Math.cos(angle),
+      y: origin.y + sideA * Math.sin(angle)
+    };
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: true,
+      sideA: sideA,
+      sideB: sideB,
+      sideC: sideC,
+      originP1: origin,
+      originP2: p2
+    };
+
+    saveToHistory();
+    setDefs([...defs, newDef]);
+    setRootPlacingMode(null);
+  };
+
+  const handleRootPlacingCancel = () => {
+    setRootPlacingMode(null);
+  };
+
+  // Canvas triangle add
+  const handleCanvasAddTriangle = (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => {
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return;
+    }
+
+    const parentTriangle = geometry.triangles.find(t => t.id === triangleId);
+    if (!parentTriangle) return;
+
+    let refEdge = 0;
+    if (edgeIndex === 0) {
+      refEdge = distance(parentTriangle.p1, parentTriangle.p2);
+    } else if (edgeIndex === 1) {
+      refEdge = distance(parentTriangle.p2, parentTriangle.p3);
+    } else {
+      refEdge = distance(parentTriangle.p3, parentTriangle.p1);
+    }
+
+    if (!isValidAttachedTriangle(refEdge, sideLeft, sideRight)) {
+      alert('三角形として成立しません。\n2辺の和が参照辺より大きい必要があります。');
+      return;
+    }
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: false,
+      attachedToTriangleId: triangleId,
+      attachedEdgeIndex: edgeIndex,
+      sideLeft: parseFloat(sideLeft.toFixed(2)),
+      sideRight: parseFloat(sideRight.toFixed(2)),
+      flip: flip
+    };
+    saveToHistory();
+    setDefs([...defs, newDef]);
+    setSelectedEdge(null);
+  };
+
+  // Vertex reshape
+  const handleVertexReshape = (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => {
+    if (sideLeft <= 0 || sideRight <= 0 || isNaN(sideLeft) || isNaN(sideRight)) {
+      return;
+    }
+
+    saveToHistory();
+    setDefs(defs.map(d => {
+      if (d.id !== triangleId) return d;
+
+      if (d.isRoot) {
+        return {
+          ...d,
+          sideB: parseFloat(sideLeft.toFixed(2)),
+          sideC: parseFloat(sideRight.toFixed(2)),
+          flip: !flip
+        };
+      } else {
+        return {
+          ...d,
+          sideLeft: parseFloat(sideLeft.toFixed(2)),
+          sideRight: parseFloat(sideRight.toFixed(2)),
+          flip: flip
+        };
+      }
+    }));
+  };
+
+  // Add standalone edge
+  const handleAddStandaloneEdge = (p1: Point, p2: Point) => {
+    const len = distance(p1, p2);
+    const newEdge: StandaloneEdge = {
+      id: generateId(),
+      p1,
+      p2,
+      length: parseFloat(len.toFixed(2))
+    };
+    saveToHistory();
+    setStandaloneEdges(prev => [...prev, newEdge]);
+  };
+
+  // Create triangle from standalone edge
+  const handleAddTriangleFromEdge = (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => {
+    const edge = standaloneEdges.find(e => e.id === edgeId);
+    if (!edge) return;
+
+    const newDef: TriangleDef = {
+      id: generateId(),
+      name: `T${defs.length + 1}`,
+      color: PALETTE[defs.length % PALETTE.length],
+      isRoot: true,
+      sideA: edge.length,
+      sideB: parseFloat(sideLeft.toFixed(2)),
+      sideC: parseFloat(sideRight.toFixed(2)),
+      originP1: edge.p1,
+      originP2: edge.p2,
+      flip: !flip
+    };
+
+    saveToHistory();
+    setDefs(prev => [...prev, newDef]);
+    setStandaloneEdges(prev => prev.filter(e => e.id !== edgeId));
+  };
+
+  // Dimension update from canvas
+  const handleDimensionUpdate = (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number): boolean => {
+    if (isNaN(newValue) || newValue <= 0) {
+      alert('値は0より大きい数値である必要があります。');
+      return false;
+    }
+
+    const triangleDef = defs.find(d => d.id === triangleId);
+    if (!triangleDef) return false;
+
+    if (triangleDef.isRoot) {
+      let sideA = triangleDef.sideA || 0;
+      let sideB = triangleDef.sideB || 0;
+      let sideC = triangleDef.sideC || 0;
+
+      if (edgeIndex === 0) sideA = newValue;
+      else if (edgeIndex === 1) sideC = newValue;
+      else if (edgeIndex === 2) sideB = newValue;
+
+      if (!isValidRootTriangle(sideA, sideB, sideC)) {
+        alert('三角形として成立しません。\n任意の2辺の和が残りの1辺より大きい必要があります。');
+        return false;
+      }
+    } else {
+      if (edgeIndex === 0) return false;
+
+      const parentTriangle = geometry.triangles.find(t => t.id === triangleDef.attachedToTriangleId);
+      if (!parentTriangle) return false;
+
+      let refEdge = 0;
+      if (triangleDef.attachedEdgeIndex === 0) {
+        refEdge = distance(parentTriangle.p1, parentTriangle.p2);
+      } else if (triangleDef.attachedEdgeIndex === 1) {
+        refEdge = distance(parentTriangle.p2, parentTriangle.p3);
+      } else {
+        refEdge = distance(parentTriangle.p3, parentTriangle.p1);
+      }
+
+      let sideLeft = triangleDef.sideLeft || 0;
+      let sideRight = triangleDef.sideRight || 0;
+
+      if (edgeIndex === 1) sideRight = newValue;
+      else if (edgeIndex === 2) sideLeft = newValue;
+
+      if (!isValidAttachedTriangle(refEdge, sideLeft, sideRight)) {
+        alert('三角形として成立しません。\n参照辺の長さが他の2辺の和より小さい必要があります。');
+        return false;
+      }
+    }
+
+    saveToHistory();
+    setDefs(prevDefs => prevDefs.map(d => {
+      if (d.id !== triangleId) return d;
+
+      if (d.isRoot) {
+        if (edgeIndex === 0) return { ...d, sideA: newValue };
+        if (edgeIndex === 1) return { ...d, sideC: newValue };
+        if (edgeIndex === 2) return { ...d, sideB: newValue };
+      } else {
+        if (edgeIndex === 0) return d;
+        if (edgeIndex === 1) return { ...d, sideRight: newValue };
+        if (edgeIndex === 2) return { ...d, sideLeft: newValue };
+      }
+      return d;
+    }));
+    return true;
+  };
+
+  // Renumber triangles
+  const renumberTriangles = (triangleDefs: TriangleDef[]): TriangleDef[] => {
+    return triangleDefs.map((def, index) => ({
+      ...def,
+      name: `T${index + 1}`
+    }));
+  };
+
+  // Delete triangle
+  const handleDeleteTriangle = (id: string) => {
+    saveToHistory();
+    const filtered = defs.filter(d => d.id !== id && d.attachedToTriangleId !== id);
+    setDefs(renumberTriangles(filtered));
+    if (selectedTriangleId === id) setSelectedTriangleId(null);
+  };
+
+  // Delete standalone edge
+  const handleDeleteStandaloneEdge = (id: string) => {
+    saveToHistory();
+    setStandaloneEdges(prev => prev.filter(e => e.id !== id));
+  };
+
+  // Update standalone edge length
+  const handleUpdateStandaloneEdgeLength = (id: string, newLength: number) => {
+    if (newLength <= 0) return;
+
+    saveToHistory();
+    setStandaloneEdges(prev => prev.map(edge => {
+      if (edge.id !== id) return edge;
+
+      const dx = edge.p2.x - edge.p1.x;
+      const dy = edge.p2.y - edge.p1.y;
+      const currentLen = Math.sqrt(dx * dx + dy * dy);
+
+      if (currentLen === 0) return edge;
+
+      const scale = newLength / currentLen;
+      const newP2: Point = {
+        id: edge.p2.id,
+        x: edge.p1.x + dx * scale,
+        y: edge.p1.y + dy * scale
+      };
+
+      return {
+        ...edge,
+        p2: newP2,
+        length: newLength
+      };
+    }));
+  };
+
+  // Move triangles by offset
+  const handleMoveTriangles = (ids: string[], dx: number, dy: number) => {
+    console.log('handleMoveTriangles called:', { ids, dx, dy });
+    saveToHistory();
+    setDefs(prevDefs => prevDefs.map(def => {
+      if (!ids.includes(def.id)) return def;
+
+      // Only root triangles can be moved
+      if (!def.isRoot) {
+        console.log(`Skipping non-root triangle: ${def.id}`);
+        return def;
+      }
+
+      // If originP1/P2 are not set, compute them from default position
+      const sa = def.sideA || 10;
+      const currentP1 = def.originP1 || { id: `p_${def.id}_1`, x: 0, y: 0 };
+      const currentP2 = def.originP2 || { id: `p_${def.id}_2`, x: sa, y: 0 };
+
+      console.log(`Moving ${def.id}: from (${currentP1.x}, ${currentP1.y}) by (${dx}, ${dy})`);
+
+      const newOriginP1: Point = {
+        ...currentP1,
+        x: currentP1.x + dx,
+        y: currentP1.y + dy
+      };
+
+      const newOriginP2: Point = {
+        ...currentP2,
+        x: currentP2.x + dx,
+        y: currentP2.y + dy
+      };
+
+      console.log(`New origin: (${newOriginP1.x}, ${newOriginP1.y})`);
+
+      return {
+        ...def,
+        originP1: newOriginP1,
+        originP2: newOriginP2
+      };
+    }));
+  };
+
+  // Move standalone edges by offset
+  const handleMoveStandaloneEdges = (ids: string[], dx: number, dy: number) => {
+    saveToHistory();
+    setStandaloneEdges(prev => prev.map(edge => {
+      if (!ids.includes(edge.id)) return edge;
+
+      return {
+        ...edge,
+        p1: { ...edge.p1, x: edge.p1.x + dx, y: edge.p1.y + dy },
+        p2: { ...edge.p2, x: edge.p2.x + dx, y: edge.p2.y + dy }
+      };
+    }));
+  };
+
+  const handleClear = () => {
+    if (window.confirm("全てのジオメトリをクリアしますか？")) {
+      saveToHistory();
+      setDefs([]);
+      setStandaloneEdges([]);
+      setSelectedTriangleId(null);
+      setSelectedEdge(null);
+    }
+  };
+
+  const handleBackgroundClick = () => {
+    setSelectedEdge(null);
+    setSelectedTriangleId(null);
+  };
+
+  const totalArea = geometry.triangles.reduce((acc, t) => acc + t.area, 0);
+
+  // Calculate occupied edges
+  const occupiedEdges = useMemo(() => {
+    const occupied = new Set<string>();
+    defs.forEach(d => {
+      if (!d.isRoot && d.attachedToTriangleId !== undefined && d.attachedEdgeIndex !== undefined) {
+        const parentEdgeKey = `${d.attachedToTriangleId}-${d.attachedEdgeIndex}`;
+        occupied.add(parentEdgeKey);
+        const childRefEdgeKey = `${d.id}-0`;
+        occupied.add(childRefEdgeKey);
+      }
+    });
+    return occupied;
+  }, [defs]);
+
+  // Find parent triangle for display
+  const getParentName = (def: TriangleDef): string | null => {
+    if (def.isRoot || !def.attachedToTriangleId) return null;
+    const parent = defs.find(d => d.id === def.attachedToTriangleId);
+    return parent?.name || null;
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-slate-100">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shadow-sm z-20">
+        <div className="flex items-center gap-2">
+          <div className="bg-blue-600 p-1.5 rounded text-white">
+            <Calculator size={18} />
+          </div>
+          <div>
+            <h1 className="text-sm font-bold text-slate-800">TriangleList</h1>
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={handleUndo}
+            disabled={history.length === 0}
+            className="text-xs text-slate-600 font-medium px-2 py-1 hover:bg-slate-100 rounded transition-colors flex items-center gap-1 disabled:opacity-40"
+            title="元に戻す (Ctrl+Z)"
+          >
+            <Undo2 size={14} />
+          </button>
+          <button
+            onClick={() => downloadDXF(geometry.triangles)}
+            className="text-xs text-green-600 font-medium px-2 py-1 hover:bg-green-50 rounded transition-colors flex items-center gap-1"
+            title="DXF出力"
+          >
+            <Download size={14} />
+          </button>
+          <button
+            onClick={handleClear}
+            className="text-xs text-red-600 font-medium px-2 py-1 hover:bg-red-50 rounded transition-colors"
+          >
+            Clear
+          </button>
+          <div className="bg-slate-100 px-2 py-1 rounded text-xs font-mono text-slate-600 border border-slate-200 ml-1">
+            Area: <span className="font-bold text-slate-900">{totalArea.toFixed(2)}</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Triangle List - Fixed height at top */}
+      <div className="bg-white border-b border-slate-200 shadow-sm z-10">
+        <div className="h-24 overflow-y-auto">
+          {defs.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+              三角形がありません。キャンバスをダブルクリックしてエッジを作成してください。
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1 p-2">
+              {defs.map(def => {
+                const isSelected = selectedTriangleId === def.id;
+                const parentName = getParentName(def);
+                return (
+                  <button
+                    key={def.id}
+                    onClick={() => setSelectedTriangleId(isSelected ? null : def.id)}
+                    className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                      isSelected
+                        ? 'bg-blue-100 border-blue-400 text-blue-800'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="font-bold">{def.name}</span>
+                    {def.isRoot ? (
+                      <span className="text-slate-500 ml-1">
+                        ({def.sideA}/{def.sideB}/{def.sideC})
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 ml-1">
+                        ← {parentName} ({def.sideLeft}/{def.sideRight})
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Canvas Area - Takes remaining space */}
+      <div className="flex-1 relative">
+        <GeometryCanvas
+          triangles={geometry.triangles}
+          mode={ToolMode.VIEW}
+          selectedTriangleId={selectedTriangleId}
+          onSelectTriangle={setSelectedTriangleId}
+          onEdgeSelect={(tId, idx) => {
+            setSelectedEdge({ triangleId: tId, edgeIndex: idx });
+          }}
+          onEdgeDoubleClick={(tId, idx) => {
+            setSelectedEdge({ triangleId: tId, edgeIndex: idx });
+          }}
+          onDimensionChange={handleDimensionUpdate}
+          onAddAttachedTriangle={handleCanvasAddTriangle}
+          onVertexReshape={handleVertexReshape}
+          onBackgroundClick={handleBackgroundClick}
+          selectedEdge={selectedEdge}
+          occupiedEdges={occupiedEdges}
+          standaloneEdges={standaloneEdges}
+          onAddStandaloneEdge={handleAddStandaloneEdge}
+          onAddTriangleFromEdge={handleAddTriangleFromEdge}
+          onDeleteTriangle={handleDeleteTriangle}
+          onDeleteStandaloneEdge={handleDeleteStandaloneEdge}
+          onUpdateStandaloneEdgeLength={handleUpdateStandaloneEdgeLength}
+          onMoveTriangles={handleMoveTriangles}
+          onMoveStandaloneEdges={handleMoveStandaloneEdges}
+          rootPlacingMode={rootPlacingMode}
+          onRootPlacingComplete={handleRootPlacingComplete}
+          onRootPlacingCancel={handleRootPlacingCancel}
+        />
+
+        {/* Placement mode overlay */}
+        {rootPlacingMode && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-500/90 backdrop-blur px-4 py-2 rounded-lg shadow-lg border border-blue-300 text-sm text-white flex items-center gap-3 z-10">
+            <span><span className="font-bold">1. 起点をクリック</span> → <span className="font-bold">2. 角度を決めてクリック</span></span>
+            <button
+              onClick={handleRootPlacingCancel}
+              className="px-2 py-1 bg-white/20 hover:bg-white/30 rounded text-xs font-medium"
+            >
+              キャンセル
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default App;
+
+
+//===============================================================================
+// FILE: index.tsx
+//===============================================================================
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
