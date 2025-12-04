@@ -1,5 +1,5 @@
 # TriangleListAI - Merged Codebase for AI Analysis
-# Generated: Thu, Dec  4, 2025  2:24:08 PM
+# Generated: Thu, Dec  4, 2025  2:25:44 PM
 # This file is for AI Studio import. Original files are preserved.
 
 //===============================================================================
@@ -1378,11 +1378,58 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setStagePosition(newPos);
   };
 
+  // Touch state for pinch zoom and double tap
+  const lastTouchDistance = useRef<number | null>(null);
+  const lastTapTime = useRef<number>(0);
+  const lastTapPos = useRef<{ x: number; y: number } | null>(null);
+  const DOUBLE_TAP_DELAY = 300; // ms
+  const DOUBLE_TAP_DISTANCE = 30; // px
+
   // Touch event handlers for mobile support
   const handleTouchStart = (e: Konva.KonvaEventObject<TouchEvent>) => {
     e.evt.preventDefault();
-    const touch = e.evt.touches[0];
+    const touches = e.evt.touches;
+
+    // Pinch zoom start (2 fingers)
+    if (touches.length === 2) {
+      cancelLongPress();
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      lastTouchDistance.current = Math.sqrt(dx * dx + dy * dy);
+      return;
+    }
+
+    const touch = touches[0];
     if (!touch) return;
+
+    // Double tap detection
+    const now = Date.now();
+    const timeSinceLastTap = now - lastTapTime.current;
+    if (lastTapPos.current && timeSinceLastTap < DOUBLE_TAP_DELAY) {
+      const dx = touch.clientX - lastTapPos.current.x;
+      const dy = touch.clientY - lastTapPos.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) < DOUBLE_TAP_DISTANCE) {
+        // Double tap detected - trigger double click behavior
+        cancelLongPress();
+        lastTapTime.current = 0;
+        lastTapPos.current = null;
+
+        // Get world point for double tap
+        if (stageRef.current && containerRef.current) {
+          const containerRect = containerRef.current.getBoundingClientRect();
+          const stage = stageRef.current;
+          const stageX = (touch.clientX - containerRect.left - stage.x()) / stage.scaleX();
+          const stageY = (touch.clientY - containerRect.top - stage.y()) / stage.scaleY();
+          const world = stageToWorld(stageX, stageY);
+          const startPoint: Point = { id: generateId(), x: world.x, y: world.y };
+          // Start drawing edge on double tap
+          setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+        }
+        return;
+      }
+    }
+    lastTapTime.current = now;
+    lastTapPos.current = { x: touch.clientX, y: touch.clientY };
 
     // Convert touch event to mouse-like event for reuse
     const fakeEvt = {
@@ -1404,7 +1451,51 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   const handleTouchMove = (e: Konva.KonvaEventObject<TouchEvent>) => {
     e.evt.preventDefault();
-    const touch = e.evt.touches[0];
+    const touches = e.evt.touches;
+
+    // Pinch zoom (2 fingers)
+    if (touches.length === 2 && lastTouchDistance.current !== null) {
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      const newDistance = Math.sqrt(dx * dx + dy * dy);
+
+      const stage = stageRef.current;
+      if (stage) {
+        const oldScale = stage.scaleX();
+
+        // Calculate center point between two fingers
+        const centerX = (touches[0].clientX + touches[1].clientX) / 2;
+        const centerY = (touches[0].clientY + touches[1].clientY) / 2;
+
+        const container = containerRef.current;
+        if (container) {
+          const containerRect = container.getBoundingClientRect();
+          const pointerX = centerX - containerRect.left;
+          const pointerY = centerY - containerRect.top;
+
+          const mousePointTo = {
+            x: (pointerX - stage.x()) / oldScale,
+            y: (pointerY - stage.y()) / oldScale,
+          };
+
+          const scaleBy = newDistance / lastTouchDistance.current;
+          const newScale = Math.max(0.1, Math.min(5, oldScale * scaleBy));
+
+          const newPos = {
+            x: pointerX - mousePointTo.x * newScale,
+            y: pointerY - mousePointTo.y * newScale,
+          };
+
+          setStageScale(newScale);
+          setStagePosition(newPos);
+        }
+      }
+
+      lastTouchDistance.current = newDistance;
+      return;
+    }
+
+    const touch = touches[0];
     if (!touch) return;
 
     const fakeEvt = {
@@ -1425,6 +1516,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   const handleTouchEnd = (e: Konva.KonvaEventObject<TouchEvent>) => {
     e.evt.preventDefault();
+    lastTouchDistance.current = null;
     handleMouseUp();
   };
 
