@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
 import Konva from 'konva';
 import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
@@ -9,6 +9,7 @@ import { CanvasControls } from './ui/CanvasControls';
 import { ContextMenu } from './ui/ContextMenu';
 import { DeleteConfirmationDialog } from './ui/DeleteConfirmationDialog';
 import { DebugConsole } from './ui/DebugConsole';
+import { usePointer, GESTURE_CONSTANTS, PointerInfo } from '../hooks/usePointer';
 
 interface GeometryCanvasProps {
   triangles: RenderedTriangle[];
@@ -280,8 +281,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     };
   }, []);
 
-  // Get world point from stage event
-  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent>): Point => {
+  // Get world point from stage event (supports both mouse and pointer events)
+  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent | PointerEvent>): Point => {
     if (!stageRef.current) return { id: generateId(), x: 0, y: 0 };
     const stage = stageRef.current;
     const pointerPos = stage.getPointerPosition();
@@ -290,6 +291,22 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     // Get position relative to stage
     const stageX = (pointerPos.x - stage.x()) / stage.scaleX();
     const stageY = (pointerPos.y - stage.y()) / stage.scaleY();
+
+    const world = stageToWorld(stageX, stageY);
+    return { id: generateId(), x: world.x, y: world.y };
+  }, [stageToWorld]);
+
+  // Get world point from client coordinates
+  const getWorldPointFromClient = useCallback((clientX: number, clientY: number): Point => {
+    if (!stageRef.current || !containerRef.current) return { id: generateId(), x: 0, y: 0 };
+    const stage = stageRef.current;
+    const containerRect = containerRef.current.getBoundingClientRect();
+
+    const pointerX = clientX - containerRect.left;
+    const pointerY = clientY - containerRect.top;
+
+    const stageX = (pointerX - stage.x()) / stage.scaleX();
+    const stageY = (pointerY - stage.y()) / stage.scaleY();
 
     const world = stageToWorld(stageX, stageY);
     return { id: generateId(), x: world.x, y: world.y };
@@ -400,164 +417,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     hasInitializedView.current = true;
   }, [triangles, standaloneEdges, getEntitiesBounds, worldToStage]);
 
-  const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    // Ignore mouse events immediately after touch events to prevent double firing
-    if (isTouchRef.current) return;
-
-    if (e.evt.button === 0 && !editingDim) {
-      // If in moving selection mode, confirm the move on click
-      if (interaction.type === 'MOVING_SELECTION') {
-        const { startWorld, currentWorld, targetIds } = interaction;
-        const dx = currentWorld.x - startWorld.x;
-        const dy = currentWorld.y - startWorld.y;
-
-        addLog(`MOVE CONFIRM: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
-
-        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-          const triangleIds: string[] = [];
-          const edgeIds: string[] = [];
-
-          targetIds.forEach(id => {
-            if (triangles.find(t => t.id === id)) {
-              triangleIds.push(id);
-            } else if (standaloneEdges.find(edge => edge.id === id)) {
-              edgeIds.push(id);
-            }
-          });
-
-          addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
-
-          if (triangleIds.length > 0 && onMoveTriangles) {
-            addLog(`Calling onMoveTriangles`);
-            onMoveTriangles(triangleIds, dx, dy);
-          }
-          if (edgeIds.length > 0 && onMoveStandaloneEdges) {
-            addLog(`Calling onMoveStandaloneEdges`);
-            onMoveStandaloneEdges(edgeIds, dx, dy);
-          }
-        }
-
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If in root placing origin mode, set the origin
-      if (interaction.type === 'ROOT_PLACING_ORIGIN') {
-        const origin = getWorldPoint(e);
-        const snappedOrigin = applySnap(origin, []);
-        setInteraction({
-          type: 'ROOT_PLACING_ANGLE',
-          sideA: interaction.sideA,
-          sideB: interaction.sideB,
-          sideC: interaction.sideC,
-          origin: snappedOrigin,
-          currentMouse: snappedOrigin
-        });
-        return;
-      }
-      // If in root placing angle mode, complete the placement
-      if (interaction.type === 'ROOT_PLACING_ANGLE') {
-        const { origin, currentMouse, sideA } = interaction;
-        // Calculate angle from origin to currentMouse
-        const dx = currentMouse.x - origin.x;
-        const dy = currentMouse.y - origin.y;
-        const angle = Math.atan2(dy, dx);
-        if (onRootPlacingComplete) {
-          onRootPlacingComplete(origin, angle);
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If in phantom placing mode, confirm the triangle on click
-      if (interaction.type === 'PHANTOM_PLACING') {
-        if (onAddAttachedTriangle) {
-          const { p1, p2, currentMouse, tId, index } = interaction;
-          // Check if this edge is already occupied
-          const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
-          if (isOccupied) {
-            // Edge already has a child triangle - don't add another
-            setInteraction({ type: 'IDLE' });
-            return;
-          }
-          // Apply snap (exclude base edge points)
-          const snappedMouse = applySnap(currentMouse, [p1, p2]);
-          const sideLeft = distance(p1, snappedMouse);
-          const sideRight = distance(p2, snappedMouse);
-          const flip = isFlipSide(p1, p2, snappedMouse);
-          if (sideLeft > 0 && sideRight > 0) {
-            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If in vertex reshaping mode, confirm the reshape on click
-      if (interaction.type === 'VERTEX_RESHAPING') {
-        if (onVertexReshape) {
-          const { p1, p2, currentMouse, tId } = interaction;
-          // Apply snap (exclude base edge points)
-          const snappedMouse = applySnap(currentMouse, [p1, p2]);
-          const sideLeft = distance(p1, snappedMouse);
-          const sideRight = distance(p2, snappedMouse);
-          const flip = isFlipSide(p1, p2, snappedMouse);
-          if (sideLeft > 0 && sideRight > 0) {
-            onVertexReshape(tId, sideLeft, sideRight, flip);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If drawing edge, confirm on click
-      if (interaction.type === 'DRAWING_EDGE') {
-        if (onAddStandaloneEdge) {
-          const { startPoint, currentMouse } = interaction;
-          // Apply snap (exclude start point)
-          const snappedMouse = applySnap(currentMouse, [startPoint]);
-          const len = distance(startPoint, snappedMouse);
-          if (len > 0.1) {
-            onAddStandaloneEdge(startPoint, snappedMouse);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If placing triangle from standalone edge, confirm on click
-      if (interaction.type === 'STANDALONE_EDGE_PLACING') {
-        if (onAddTriangleFromEdge) {
-          const { edgeId, p1, p2, currentMouse } = interaction;
-          // Apply snap (exclude base edge points)
-          const snappedMouse = applySnap(currentMouse, [p1, p2]);
-          const sideLeft = distance(p1, snappedMouse);
-          const sideRight = distance(p2, snappedMouse);
-          const flip = isFlipSide(p1, p2, snappedMouse);
-          if (sideLeft > 0 && sideRight > 0) {
-            onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // If extending edge, confirm on click
-      if (interaction.type === 'EXTENDING_EDGE') {
-        if (onAddStandaloneEdge) {
-          const { fromPoint, currentMouse } = interaction;
-          // Apply snap (exclude from point)
-          const snappedMouse = applySnap(currentMouse, [fromPoint]);
-          const len = distance(fromPoint, snappedMouse);
-          if (len > 0.1) {
-            onAddStandaloneEdge(fromPoint, snappedMouse);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-        return;
-      }
-      // Start long press timer for SELECT_RECT
-      const worldPoint = getWorldPoint(e);
-      startBackgroundLongPress(e.evt.clientX, e.evt.clientY, worldPoint);
-      setInteraction({ type: 'PAN_READY', startX: e.evt.clientX, startY: e.evt.clientY });
-    }
-  };
-
-  // Double click on background to start drawing an edge
+  // Double click on background to start drawing an edge (legacy - for GridBackground)
   // This is called from the background Rect, not Stage, to avoid intercepting other element events
   const handleBackgroundDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Only handle if click target is the background rect itself
@@ -569,9 +429,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
   };
 
-  const handleEdgeMouseDown = (e: Konva.KonvaEventObject<MouseEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
+  // Edge pointer down handler - works with both mouse and touch via pointer events
+  const handleEdgePointerDown = (e: Konva.KonvaEventObject<PointerEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
     e.evt.stopPropagation();
-    if (e.evt.button === 0 && !editingDim) {
+    if (!editingDim) {
       setInteraction({
         type: 'EDGE_READY',
         tId,
@@ -581,68 +442,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         startX: e.evt.clientX,
         startY: e.evt.clientY
       });
-    }
-  };
-
-  const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    // Ignore mouse events immediately after touch events to prevent double firing
-    if (isTouchRef.current) return;
-
-    // Cancel long press if mouse moved too much
-    if (longPressStartPosRef.current && longPressTimerRef.current) {
-      const dx = e.evt.clientX - longPressStartPosRef.current.x;
-      const dy = e.evt.clientY - longPressStartPosRef.current.y;
-      if (Math.sqrt(dx * dx + dy * dy) > 5) {
-        cancelLongPress();
-      }
-    }
-
-    if (interaction.type === 'SELECT_RECT') {
-      const currentWorld = getWorldPoint(e);
-      setInteraction({ ...interaction, currentWorld });
-      return;
-    } else if (interaction.type === 'MOVING_SELECTION') {
-      const currentWorld = getWorldPoint(e);
-      setInteraction({ ...interaction, currentWorld });
-      return;
-    } else if (interaction.type === 'PAN_READY') {
-      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
-      if (dist > 3) {
-        cancelLongPress(); // Cancel long press when starting to pan
-        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
-      }
-    } else if (interaction.type === 'PANNING') {
-      const dx = e.evt.clientX - interaction.lastX;
-      const dy = e.evt.clientY - interaction.lastY;
-      setStagePosition(prev => ({ x: prev.x + dx, y: prev.y + dy }));
-      setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
-    } else if (interaction.type === 'EDGE_READY') {
-      // Dragging on edge no longer creates triangle - switch to panning instead
-      const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
-      if (dist > 5) {
-        setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
-      }
-    } else if (interaction.type === 'PHANTOM_PLACING') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'VERTEX_RESHAPING') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'DRAWING_EDGE') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'STANDALONE_EDGE_PLACING') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'EXTENDING_EDGE') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'ROOT_PLACING_ORIGIN') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
-    } else if (interaction.type === 'ROOT_PLACING_ANGLE') {
-      const currentMouse = getWorldPoint(e);
-      setInteraction({ ...interaction, currentMouse });
     }
   };
 
@@ -660,107 +459,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const cy = (e.p1.y + e.p2.y) / 2;
     return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
   }, []);
-
-  const handleMouseUp = () => {
-    // Ignore mouse events immediately after touch events to prevent double firing
-    if (isTouchRef.current) return;
-
-    cancelLongPress();
-
-    // Handle MOVING_SELECTION completion
-    if (interaction.type === 'MOVING_SELECTION') {
-      const { startWorld, currentWorld, targetIds } = interaction;
-      const dx = currentWorld.x - startWorld.x;
-      const dy = currentWorld.y - startWorld.y;
-
-      addLog(`MOVE: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
-
-      // Only move if there's actual displacement
-      if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-        const triangleIds: string[] = [];
-        const edgeIds: string[] = [];
-
-        targetIds.forEach(id => {
-          if (triangles.find(t => t.id === id)) {
-            triangleIds.push(id);
-          } else if (standaloneEdges.find(e => e.id === id)) {
-            edgeIds.push(id);
-          }
-        });
-
-        addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
-
-        if (triangleIds.length > 0 && onMoveTriangles) {
-          addLog(`Calling onMoveTriangles`);
-          onMoveTriangles(triangleIds, dx, dy);
-        }
-        if (edgeIds.length > 0 && onMoveStandaloneEdges) {
-          addLog(`Calling onMoveStandaloneEdges`);
-          onMoveStandaloneEdges(edgeIds, dx, dy);
-        }
-      } else {
-        addLog(`MOVE: displacement too small`);
-      }
-
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
-
-    // Handle SELECT_RECT completion
-    if (interaction.type === 'SELECT_RECT') {
-      const { startWorld, currentWorld } = interaction;
-      const minX = Math.min(startWorld.x, currentWorld.x);
-      const maxX = Math.max(startWorld.x, currentWorld.x);
-      const minY = Math.min(startWorld.y, currentWorld.y);
-      const maxY = Math.max(startWorld.y, currentWorld.y);
-
-      // Only select if rectangle is big enough
-      if (Math.abs(maxX - minX) > 0.1 || Math.abs(maxY - minY) > 0.1) {
-        const newSelection = new Set<string>();
-
-        // Find triangles inside rectangle
-        triangles.forEach(t => {
-          if (isTriangleInRect(t, minX, maxX, minY, maxY)) {
-            newSelection.add(t.id);
-          }
-        });
-
-        // Find standalone edges inside rectangle
-        standaloneEdges.forEach(e => {
-          if (isEdgeInRect(e, minX, maxX, minY, maxY)) {
-            newSelection.add(e.id);
-          }
-        });
-
-        setSelectedIds(newSelection);
-      }
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
-
-    // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
-    if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
-      interaction.type === 'ROOT_PLACING_ANGLE' ||
-      interaction.type === 'PHANTOM_PLACING' ||
-      interaction.type === 'VERTEX_RESHAPING' ||
-      interaction.type === 'DRAWING_EDGE' ||
-      interaction.type === 'STANDALONE_EDGE_PLACING' ||
-      interaction.type === 'EXTENDING_EDGE') {
-      return;
-    }
-
-    if (interaction.type === 'EDGE_READY') {
-      // Single click on edge - select the edge only (no triangle creation)
-      onEdgeSelect(interaction.tId, interaction.index);
-    } else if (interaction.type === 'PAN_READY') {
-      if (onBackgroundClick) {
-        onBackgroundClick();
-      }
-      // Clear multi-selection on background click
-      setSelectedIds(new Set());
-    }
-    setInteraction({ type: 'IDLE' });
-  };
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -794,259 +492,464 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setStagePosition(newPos);
   };
 
-  // Touch state for pinch zoom and double tap
-  const lastTouchDistance = useRef<number | null>(null);
-  const lastTapTime = useRef<number>(0);
-  const lastTapPos = useRef<{ x: number; y: number } | null>(null);
-  const isTouchRef = useRef<boolean>(false); // Flag to prevent mouse events from firing after touch
-  const DOUBLE_TAP_DELAY = 300; // ms
-  const DOUBLE_TAP_DISTANCE = 30; // px
+  // ===========================================
+  // Unified Pointer Event Handling
+  // ===========================================
 
-  // Helper to create a type-safe fake mouse event
-  const createFakeMouseEvent = (
-    touch: React.Touch | Touch,
-    originalEvent: Konva.KonvaEventObject<TouchEvent>,
-    type: 'mousedown' | 'mousemove' | 'mouseup'
-  ): Konva.KonvaEventObject<MouseEvent> => {
-    const fakeEvt = new MouseEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      detail: 1,
-      screenX: touch.screenX,
-      screenY: touch.screenY,
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-      ctrlKey: false,
-      altKey: false,
-      shiftKey: false,
-      metaKey: false,
-      button: 0,
-      buttons: 1,
-    });
+  // Pinch zoom state (managed by usePointer hook)
+  const pinchBaseScaleRef = useRef<number>(1);
+  const pinchBasePosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-    // We need to cast this to satisfy Konva's type requirements, 
-    // effectively tricking it into treating our constructed MouseEvent as the underlying event
-    return {
-      ...originalEvent,
-      evt: fakeEvt,
-      target: originalEvent.target,
-      currentTarget: originalEvent.currentTarget,
-    } as unknown as Konva.KonvaEventObject<MouseEvent>;
-  };
+  // usePointer hook for unified gesture handling
+  const pointerHandlers = usePointer({
+    onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent) => {
+      addLog(`PointerDown: type=${pointer.pointerType}, id=${pointer.id}`);
 
-  // Touch event handlers for mobile support
-  const handleTouchStart = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    isTouchRef.current = true;
-    const touches = e.evt.touches;
+      // If in a creation mode, handle confirmation on next click
+      if (interaction.type === 'MOVING_SELECTION') {
+        const { startWorld, currentWorld, targetIds } = interaction;
+        const dx = currentWorld.x - startWorld.x;
+        const dy = currentWorld.y - startWorld.y;
 
-    // Pinch zoom start (2 fingers)
-    if (touches.length === 2) {
-      e.evt.preventDefault(); // Always prevent default for pinch zoom
-      cancelLongPress();
-      const dx = touches[0].clientX - touches[1].clientX;
-      const dy = touches[0].clientY - touches[1].clientY;
-      lastTouchDistance.current = Math.sqrt(dx * dx + dy * dy);
-      return;
-    }
+        addLog(`MOVE CONFIRM: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
 
-    const touch = touches[0];
-    if (!touch) return;
+        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+          const triangleIds: string[] = [];
+          const edgeIds: string[] = [];
 
-    // Double tap detection
-    const now = Date.now();
-    const timeSinceLastTap = now - lastTapTime.current;
+          targetIds.forEach(id => {
+            if (triangles.find(t => t.id === id)) {
+              triangleIds.push(id);
+            } else if (standaloneEdges.find(edge => edge.id === id)) {
+              edgeIds.push(id);
+            }
+          });
 
-    if (lastTapPos.current && timeSinceLastTap < DOUBLE_TAP_DELAY) {
-      const dx = touch.clientX - lastTapPos.current.x;
-      const dy = touch.clientY - lastTapPos.current.y;
-      if (Math.sqrt(dx * dx + dy * dy) < DOUBLE_TAP_DISTANCE) {
-        // Double tap detected
-        e.evt.preventDefault(); // Prevent zoom on double tap
-        cancelLongPress();
-        lastTapTime.current = 0;
-        lastTapPos.current = null;
-
-        // Get world point for double tap
-        if (stageRef.current && containerRef.current) {
-          const containerRect = containerRef.current.getBoundingClientRect();
-          const stage = stageRef.current;
-          const stageX = (touch.clientX - containerRect.left - stage.x()) / stage.scaleX();
-          const stageY = (touch.clientY - containerRect.top - stage.y()) / stage.scaleY();
-          const world = stageToWorld(stageX, stageY);
-          const startPoint: Point = { id: generateId(), x: world.x, y: world.y };
-          // Start drawing edge on double tap
-          addLog(`DoubleTap: Starting DRAWING_EDGE at (${world.x.toFixed(1)}, ${world.y.toFixed(1)})`);
-          setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+          if (triangleIds.length > 0 && onMoveTriangles) {
+            onMoveTriangles(triangleIds, dx, dy);
+          }
+          if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+            onMoveStandaloneEdges(edgeIds, dx, dy);
+          }
         }
-        // Don't return - let the touch continue to track movement
-        // The finger is still down, so we want subsequent touchmove to update the edge
+
+        setInteraction({ type: 'IDLE' });
         return;
       }
-    }
-    lastTapTime.current = now;
-    lastTapPos.current = { x: touch.clientX, y: touch.clientY };
 
-    // If we are touching a shape (not background), prevent default to stop scrolling
-    // The background rect has name 'background-rect'
-    const isBackground = e.target.name() === 'background-rect' || e.target === e.target.getStage();
-
-    if (!isBackground) {
-      e.evt.preventDefault(); // Prevent scrolling when touching shapes
-    }
-
-    // Convert touch event to mouse-like event for reuse
-    const fakeEvent = createFakeMouseEvent(touch, e, 'mousedown');
-    handleMouseDown(fakeEvent);
-  };
-
-  const handleTouchMove = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    const touches = e.evt.touches;
-
-    // Pinch zoom (2 fingers)
-    if (touches.length === 2 && lastTouchDistance.current !== null) {
-      e.evt.preventDefault(); // Prevent default for pinch zoom
-      const dx = touches[0].clientX - touches[1].clientX;
-      const dy = touches[0].clientY - touches[1].clientY;
-      const newDistance = Math.sqrt(dx * dx + dy * dy);
-
-      const stage = stageRef.current;
-      if (stage) {
-        const oldScale = stage.scaleX();
-
-        // Calculate center point between two fingers
-        const centerX = (touches[0].clientX + touches[1].clientX) / 2;
-        const centerY = (touches[0].clientY + touches[1].clientY) / 2;
-
-        const container = containerRef.current;
-        if (container) {
-          const containerRect = container.getBoundingClientRect();
-          const pointerX = centerX - containerRect.left;
-          const pointerY = centerY - containerRect.top;
-
-          const mousePointTo = {
-            x: (pointerX - stage.x()) / oldScale,
-            y: (pointerY - stage.y()) / oldScale,
-          };
-
-          const scaleBy = newDistance / lastTouchDistance.current;
-          const newScale = Math.max(0.1, Math.min(5, oldScale * scaleBy));
-
-          const newPos = {
-            x: pointerX - mousePointTo.x * newScale,
-            y: pointerY - mousePointTo.y * newScale,
-          };
-
-          setStageScale(newScale);
-          setStagePosition(newPos);
-        }
+      // Handle ROOT_PLACING_ORIGIN
+      if (interaction.type === 'ROOT_PLACING_ORIGIN') {
+        const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
+        const snappedOrigin = applySnap(worldPoint, []);
+        setInteraction({
+          type: 'ROOT_PLACING_ANGLE',
+          sideA: interaction.sideA,
+          sideB: interaction.sideB,
+          sideC: interaction.sideC,
+          origin: snappedOrigin,
+          currentMouse: snappedOrigin
+        });
+        return;
       }
 
-      lastTouchDistance.current = newDistance;
-      return;
-    }
-
-    const touch = touches[0];
-    if (!touch) return;
-
-    // If we are dragging something, prevent default to stop scrolling
-    if (interaction.type !== 'IDLE' && interaction.type !== 'SELECT_RECT') {
-      e.evt.preventDefault();
-    }
-
-    const fakeEvent = createFakeMouseEvent(touch, e, 'mousemove');
-    handleMouseMove(fakeEvent);
-  };
-
-  const handleTouchEnd = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    lastTouchDistance.current = null;
-
-    // Reset isTouch flag after a small delay to ensure any subsequent simulated mouse events are ignored
-    setTimeout(() => {
-      isTouchRef.current = false;
-    }, 100);
-
-    addLog(`TouchEnd: interaction.type=${interaction.type}`);
-
-    // Handle confirmation for touch-based interactions
-    // On mobile, lifting finger should confirm the action (like clicking on desktop)
-    if (interaction.type === 'DRAWING_EDGE') {
-      if (onAddStandaloneEdge) {
-        const { startPoint, currentMouse } = interaction;
-        const snappedMouse = applySnap(currentMouse, [startPoint]);
-        const len = distance(startPoint, snappedMouse);
-        addLog(`TouchEnd DRAWING_EDGE: len=${len.toFixed(2)}`);
-        if (len > 0.1) {
-          onAddStandaloneEdge(startPoint, snappedMouse);
+      // Handle ROOT_PLACING_ANGLE
+      if (interaction.type === 'ROOT_PLACING_ANGLE') {
+        const { origin, currentMouse } = interaction;
+        const dx = currentMouse.x - origin.x;
+        const dy = currentMouse.y - origin.y;
+        const angle = Math.atan2(dy, dx);
+        if (onRootPlacingComplete) {
+          onRootPlacingComplete(origin, angle);
         }
+        setInteraction({ type: 'IDLE' });
+        return;
       }
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
 
-    if (interaction.type === 'PHANTOM_PLACING') {
-      if (onAddAttachedTriangle) {
-        const { p1, p2, currentMouse, tId, index } = interaction;
-        const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
-        if (!isOccupied) {
+      // Handle PHANTOM_PLACING confirmation
+      if (interaction.type === 'PHANTOM_PLACING') {
+        if (onAddAttachedTriangle) {
+          const { p1, p2, currentMouse, tId, index } = interaction;
+          const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+          if (!isOccupied) {
+            const snappedMouse = applySnap(currentMouse, [p1, p2]);
+            const sideLeft = distance(p1, snappedMouse);
+            const sideRight = distance(p2, snappedMouse);
+            const flip = isFlipSide(p1, p2, snappedMouse);
+            if (sideLeft > 0 && sideRight > 0) {
+              onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+            }
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Handle VERTEX_RESHAPING confirmation
+      if (interaction.type === 'VERTEX_RESHAPING') {
+        if (onVertexReshape) {
+          const { p1, p2, currentMouse, tId } = interaction;
           const snappedMouse = applySnap(currentMouse, [p1, p2]);
           const sideLeft = distance(p1, snappedMouse);
           const sideRight = distance(p2, snappedMouse);
           const flip = isFlipSide(p1, p2, snappedMouse);
           if (sideLeft > 0 && sideRight > 0) {
-            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+            onVertexReshape(tId, sideLeft, sideRight, flip);
           }
         }
+        setInteraction({ type: 'IDLE' });
+        return;
       }
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
 
-    if (interaction.type === 'STANDALONE_EDGE_PLACING') {
-      if (onAddTriangleFromEdge) {
-        const { edgeId, p1, p2, currentMouse } = interaction;
-        const snappedMouse = applySnap(currentMouse, [p1, p2]);
-        const sideLeft = distance(p1, snappedMouse);
-        const sideRight = distance(p2, snappedMouse);
-        const flip = isFlipSide(p1, p2, snappedMouse);
-        if (sideLeft > 0 && sideRight > 0) {
-          onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+      // Handle DRAWING_EDGE confirmation
+      if (interaction.type === 'DRAWING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { startPoint, currentMouse } = interaction;
+          const snappedMouse = applySnap(currentMouse, [startPoint]);
+          const len = distance(startPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(startPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Handle STANDALONE_EDGE_PLACING confirmation
+      if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+        if (onAddTriangleFromEdge) {
+          const { edgeId, p1, p2, currentMouse } = interaction;
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Handle EXTENDING_EDGE confirmation
+      if (interaction.type === 'EXTENDING_EDGE') {
+        if (onAddStandaloneEdge) {
+          const { fromPoint, currentMouse } = interaction;
+          const snappedMouse = applySnap(currentMouse, [fromPoint]);
+          const len = distance(fromPoint, snappedMouse);
+          if (len > 0.1) {
+            onAddStandaloneEdge(fromPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Default: start long press timer and PAN_READY
+      if (!editingDim) {
+        const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
+        startBackgroundLongPress(pointer.clientX, pointer.clientY, worldPoint);
+        setInteraction({ type: 'PAN_READY', startX: pointer.clientX, startY: pointer.clientY });
+      }
+    }, [interaction, triangles, standaloneEdges, editingDim, occupiedEdges,
+        onMoveTriangles, onMoveStandaloneEdges, onRootPlacingComplete,
+        onAddAttachedTriangle, onVertexReshape, onAddStandaloneEdge,
+        onAddTriangleFromEdge, applySnap, isFlipSide, getWorldPointFromClient,
+        startBackgroundLongPress, addLog]),
+
+    onPointerMove: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
+      // Cancel long press if moved too much
+      if (longPressStartPosRef.current && longPressTimerRef.current) {
+        const dx = pointer.clientX - longPressStartPosRef.current.x;
+        const dy = pointer.clientY - longPressStartPosRef.current.y;
+        if (Math.sqrt(dx * dx + dy * dy) > 5) {
+          cancelLongPress();
         }
       }
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
 
-    if (interaction.type === 'VERTEX_RESHAPING') {
-      if (onVertexReshape) {
-        const { p1, p2, currentMouse, tId } = interaction;
-        const snappedMouse = applySnap(currentMouse, [p1, p2]);
-        const sideLeft = distance(p1, snappedMouse);
-        const sideRight = distance(p2, snappedMouse);
-        const flip = isFlipSide(p1, p2, snappedMouse);
-        if (sideLeft > 0 && sideRight > 0) {
-          onVertexReshape(tId, sideLeft, sideRight, flip);
+      const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
+
+      if (interaction.type === 'SELECT_RECT') {
+        setInteraction({ ...interaction, currentWorld: worldPoint });
+        return;
+      }
+
+      if (interaction.type === 'MOVING_SELECTION') {
+        setInteraction({ ...interaction, currentWorld: worldPoint });
+        return;
+      }
+
+      if (interaction.type === 'PAN_READY') {
+        const dist = Math.sqrt(Math.pow(pointer.clientX - interaction.startX, 2) + Math.pow(pointer.clientY - interaction.startY, 2));
+        if (dist > 3) {
+          cancelLongPress();
+          setInteraction({ type: 'PANNING', lastX: pointer.clientX, lastY: pointer.clientY });
+        }
+        return;
+      }
+
+      if (interaction.type === 'PANNING') {
+        const dx = pointer.clientX - interaction.lastX;
+        const dy = pointer.clientY - interaction.lastY;
+        setStagePosition(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+        setInteraction({ type: 'PANNING', lastX: pointer.clientX, lastY: pointer.clientY });
+        return;
+      }
+
+      if (interaction.type === 'EDGE_READY') {
+        const dist = Math.sqrt(Math.pow(pointer.clientX - interaction.startX, 2) + Math.pow(pointer.clientY - interaction.startY, 2));
+        if (dist > 5) {
+          setInteraction({ type: 'PANNING', lastX: pointer.clientX, lastY: pointer.clientY });
+        }
+        return;
+      }
+
+      // Update mouse position for various creation modes
+      if (interaction.type === 'PHANTOM_PLACING' ||
+          interaction.type === 'VERTEX_RESHAPING' ||
+          interaction.type === 'DRAWING_EDGE' ||
+          interaction.type === 'STANDALONE_EDGE_PLACING' ||
+          interaction.type === 'EXTENDING_EDGE' ||
+          interaction.type === 'ROOT_PLACING_ORIGIN' ||
+          interaction.type === 'ROOT_PLACING_ANGLE') {
+        setInteraction({ ...interaction, currentMouse: worldPoint });
+      }
+    }, [interaction, cancelLongPress, getWorldPointFromClient]),
+
+    onPointerUp: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
+      addLog(`PointerUp: type=${pointer.pointerType}, id=${pointer.id}, interaction=${interaction.type}`);
+
+      // Handle confirmation for touch-based interactions (finger lift = confirm)
+      if (pointer.pointerType === 'touch') {
+        if (interaction.type === 'DRAWING_EDGE') {
+          if (onAddStandaloneEdge) {
+            const { startPoint, currentMouse } = interaction;
+            const snappedMouse = applySnap(currentMouse, [startPoint]);
+            const len = distance(startPoint, snappedMouse);
+            addLog(`TouchEnd DRAWING_EDGE: len=${len.toFixed(2)}`);
+            if (len > 0.1) {
+              onAddStandaloneEdge(startPoint, snappedMouse);
+            }
+          }
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+
+        if (interaction.type === 'PHANTOM_PLACING') {
+          if (onAddAttachedTriangle) {
+            const { p1, p2, currentMouse, tId, index } = interaction;
+            const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+            if (!isOccupied) {
+              const snappedMouse = applySnap(currentMouse, [p1, p2]);
+              const sideLeft = distance(p1, snappedMouse);
+              const sideRight = distance(p2, snappedMouse);
+              const flip = isFlipSide(p1, p2, snappedMouse);
+              if (sideLeft > 0 && sideRight > 0) {
+                onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+              }
+            }
+          }
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+
+        if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+          if (onAddTriangleFromEdge) {
+            const { edgeId, p1, p2, currentMouse } = interaction;
+            const snappedMouse = applySnap(currentMouse, [p1, p2]);
+            const sideLeft = distance(p1, snappedMouse);
+            const sideRight = distance(p2, snappedMouse);
+            const flip = isFlipSide(p1, p2, snappedMouse);
+            if (sideLeft > 0 && sideRight > 0) {
+              onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+            }
+          }
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+
+        if (interaction.type === 'VERTEX_RESHAPING') {
+          if (onVertexReshape) {
+            const { p1, p2, currentMouse, tId } = interaction;
+            const snappedMouse = applySnap(currentMouse, [p1, p2]);
+            const sideLeft = distance(p1, snappedMouse);
+            const sideRight = distance(p2, snappedMouse);
+            const flip = isFlipSide(p1, p2, snappedMouse);
+            if (sideLeft > 0 && sideRight > 0) {
+              onVertexReshape(tId, sideLeft, sideRight, flip);
+            }
+          }
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+
+        if (interaction.type === 'EXTENDING_EDGE') {
+          if (onAddStandaloneEdge) {
+            const { fromPoint, currentMouse } = interaction;
+            const snappedMouse = applySnap(currentMouse, [fromPoint]);
+            const len = distance(fromPoint, snappedMouse);
+            if (len > 0.1) {
+              onAddStandaloneEdge(fromPoint, snappedMouse);
+            }
+          }
+          setInteraction({ type: 'IDLE' });
+          return;
         }
       }
-      setInteraction({ type: 'IDLE' });
-      return;
-    }
 
-    if (interaction.type === 'EXTENDING_EDGE') {
-      if (onAddStandaloneEdge) {
-        const { fromPoint, currentMouse } = interaction;
-        const snappedMouse = applySnap(currentMouse, [fromPoint]);
-        const len = distance(fromPoint, snappedMouse);
-        if (len > 0.1) {
-          onAddStandaloneEdge(fromPoint, snappedMouse);
+      // Handle MOVING_SELECTION completion
+      if (interaction.type === 'MOVING_SELECTION') {
+        const { startWorld, currentWorld, targetIds } = interaction;
+        const dx = currentWorld.x - startWorld.x;
+        const dy = currentWorld.y - startWorld.y;
+
+        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+          const triangleIds: string[] = [];
+          const edgeIds: string[] = [];
+
+          targetIds.forEach(id => {
+            if (triangles.find(t => t.id === id)) {
+              triangleIds.push(id);
+            } else if (standaloneEdges.find(e => e.id === id)) {
+              edgeIds.push(id);
+            }
+          });
+
+          if (triangleIds.length > 0 && onMoveTriangles) {
+            onMoveTriangles(triangleIds, dx, dy);
+          }
+          if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+            onMoveStandaloneEdges(edgeIds, dx, dy);
+          }
         }
+
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Handle SELECT_RECT completion
+      if (interaction.type === 'SELECT_RECT') {
+        const { startWorld, currentWorld } = interaction;
+        const minX = Math.min(startWorld.x, currentWorld.x);
+        const maxX = Math.max(startWorld.x, currentWorld.x);
+        const minY = Math.min(startWorld.y, currentWorld.y);
+        const maxY = Math.max(startWorld.y, currentWorld.y);
+
+        if (Math.abs(maxX - minX) > 0.1 || Math.abs(maxY - minY) > 0.1) {
+          const newSelection = new Set<string>();
+
+          triangles.forEach(t => {
+            if (isTriangleInRect(t, minX, maxX, minY, maxY)) {
+              newSelection.add(t.id);
+            }
+          });
+
+          standaloneEdges.forEach(e => {
+            if (isEdgeInRect(e, minX, maxX, minY, maxY)) {
+              newSelection.add(e.id);
+            }
+          });
+
+          setSelectedIds(newSelection);
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
+      if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
+          interaction.type === 'ROOT_PLACING_ANGLE' ||
+          interaction.type === 'PHANTOM_PLACING' ||
+          interaction.type === 'VERTEX_RESHAPING' ||
+          interaction.type === 'DRAWING_EDGE' ||
+          interaction.type === 'STANDALONE_EDGE_PLACING' ||
+          interaction.type === 'EXTENDING_EDGE') {
+        return;
+      }
+
+      if (interaction.type === 'EDGE_READY') {
+        onEdgeSelect(interaction.tId, interaction.index);
+      } else if (interaction.type === 'PAN_READY') {
+        if (onBackgroundClick) {
+          onBackgroundClick();
+        }
+        setSelectedIds(new Set());
       }
       setInteraction({ type: 'IDLE' });
-      return;
-    }
+    }, [interaction, triangles, standaloneEdges, occupiedEdges,
+        onMoveTriangles, onMoveStandaloneEdges, onAddStandaloneEdge,
+        onAddAttachedTriangle, onAddTriangleFromEdge, onVertexReshape,
+        onEdgeSelect, onBackgroundClick, applySnap, isFlipSide,
+        isTriangleInRect, isEdgeInRect, addLog]),
 
-    handleMouseUp();
-  };
+    onLongPress: useCallback((clientX: number, clientY: number, target: Konva.Node) => {
+      // Get entity info from target
+      const targetName = target.name();
+      addLog(`LongPress: target=${targetName}`);
+
+      // Check if it's a triangle or standalone edge
+      if (targetName.startsWith('triangle-')) {
+        const tId = targetName.replace('triangle-', '');
+        setContextMenu({ x: clientX, y: clientY, targetType: 'triangle', targetId: tId });
+      } else if (targetName.startsWith('standalone-edge-')) {
+        const edgeId = targetName.replace('standalone-edge-', '');
+        setContextMenu({ x: clientX, y: clientY, targetType: 'edge', targetId: edgeId });
+      } else if (targetName === 'background-rect' || !targetName) {
+        // Long press on background - start SELECT_RECT
+        const worldPoint = getWorldPointFromClient(clientX, clientY);
+        setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+      }
+    }, [getWorldPointFromClient, addLog]),
+
+    onDoubleTap: useCallback((clientX: number, clientY: number, target: Konva.Node, evt: PointerEvent) => {
+      const targetName = target.name();
+      addLog(`DoubleTap: target=${targetName}`);
+
+      // Double tap on background starts edge drawing
+      if (targetName === 'background-rect' || !targetName) {
+        const worldPoint = getWorldPointFromClient(clientX, clientY);
+        const startPoint: Point = { id: generateId(), x: worldPoint.x, y: worldPoint.y };
+        addLog(`DoubleTap: Starting DRAWING_EDGE at (${worldPoint.x.toFixed(1)}, ${worldPoint.y.toFixed(1)})`);
+        setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+      }
+    }, [getWorldPointFromClient, addLog]),
+
+    onPinchStart: useCallback((centerX: number, centerY: number, distance: number) => {
+      if (stageRef.current) {
+        pinchBaseScaleRef.current = stageRef.current.scaleX();
+        pinchBasePosRef.current = { x: stageRef.current.x(), y: stageRef.current.y() };
+      }
+      addLog(`PinchStart: center=(${centerX.toFixed(0)}, ${centerY.toFixed(0)}), dist=${distance.toFixed(0)}`);
+    }, [addLog]),
+
+    onPinchMove: useCallback((centerX: number, centerY: number, scale: number, distance: number) => {
+      if (!stageRef.current || !containerRef.current) return;
+
+      const stage = stageRef.current;
+      const containerRect = containerRef.current.getBoundingClientRect();
+      const pointerX = centerX - containerRect.left;
+      const pointerY = centerY - containerRect.top;
+
+      const oldScale = pinchBaseScaleRef.current;
+      const mousePointTo = {
+        x: (pointerX - pinchBasePosRef.current.x) / oldScale,
+        y: (pointerY - pinchBasePosRef.current.y) / oldScale,
+      };
+
+      const newScale = Math.max(0.1, Math.min(5, oldScale * scale));
+
+      const newPos = {
+        x: pointerX - mousePointTo.x * newScale,
+        y: pointerY - mousePointTo.y * newScale,
+      };
+
+      setStageScale(newScale);
+      setStagePosition(newPos);
+    }, []),
+
+    onPinchEnd: useCallback(() => {
+      addLog('PinchEnd');
+    }, [addLog]),
+  });
 
   const handleZoomBtn = (direction: 'in' | 'out') => {
     if (!stageRef.current) return;
@@ -1217,46 +1120,20 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               // Allow edge selection even if occupied (for highlight)
               onEdgeSelect(t.id, index);
             }}
-            onTap={(e) => {
+            onPointerClick={(e) => {
+              // Pointer click for edge selection (works for both mouse and touch)
               e.evt.stopPropagation();
               e.cancelBubble = true;
               onEdgeSelect(t.id, index);
             }}
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
-                handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
+                handleEdgePointerDown(e, t.id, index, pStart, pEnd);
               }
             }}
-            onTouchStart={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              if (!isOccupied) {
-                const touch = e.evt.touches[0];
-                if (touch) {
-                  const fakeEvent = createFakeMouseEvent(touch, e, 'mousedown');
-                  handleEdgeMouseDown(fakeEvent, t.id, index, pStart, pEnd);
-                }
-              }
-            }}
-            onDblClick={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              if (!isOccupied) {
-                // Enter phantom placing mode
-                const currentMouse = getWorldPoint(e);
-                setInteraction({
-                  type: 'PHANTOM_PLACING',
-                  tId: t.id,
-                  index,
-                  p1: pStart,
-                  p2: pEnd,
-                  currentMouse
-                });
-              }
-            }}
-            onDblTap={(e) => {
+            onPointerDblClick={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
@@ -2122,13 +1999,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         scaleY={stageScale}
         x={stagePosition.x}
         y={stagePosition.y}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
+        onPointerDown={pointerHandlers.handlePointerDown}
+        onPointerMove={pointerHandlers.handlePointerMove}
+        onPointerUp={pointerHandlers.handlePointerUp}
+        onPointerCancel={pointerHandlers.handlePointerCancel}
+        onPointerLeave={pointerHandlers.handlePointerLeave}
         onWheel={handleWheel}
         style={{ cursor: cursorStyle, touchAction: 'none' }}
       >
