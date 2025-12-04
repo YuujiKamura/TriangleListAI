@@ -53,12 +53,6 @@ export enum ToolMode {
   DELETE = 'DELETE'
 }
 
-export interface AIAnalysisResult {
-  text: string;
-  loading: boolean;
-  error?: string;
-}
-
 // Standalone edge (not part of a triangle yet)
 export interface StandaloneEdge {
   id: string;

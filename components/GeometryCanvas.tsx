@@ -24,6 +24,8 @@ interface GeometryCanvasProps {
   onDeleteTriangle?: (id: string) => void;
   onDeleteStandaloneEdge?: (id: string) => void;
   onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
+  onMoveTriangles?: (ids: string[], dx: number, dy: number) => void;
+  onMoveStandaloneEdges?: (ids: string[], dx: number, dy: number) => void;
   // Root triangle placement mode
   rootPlacingMode?: { sideA: number; sideB: number; sideC: number } | null;
   onRootPlacingComplete?: (origin: Point, angle: number) => void;
@@ -34,6 +36,7 @@ type InteractionState =
   | { type: 'IDLE' }
   | { type: 'PAN_READY'; startX: number; startY: number }
   | { type: 'PANNING'; lastX: number; lastY: number }
+  | { type: 'SELECT_RECT'; startWorld: Point; currentWorld: Point }
   | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
   | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
@@ -42,7 +45,16 @@ type InteractionState =
   | { type: 'STANDALONE_EDGE_PLACING'; edgeId: string; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point }
   | { type: 'ROOT_PLACING_ORIGIN'; sideA: number; sideB: number; sideC: number; currentMouse: Point }
-  | { type: 'ROOT_PLACING_ANGLE'; sideA: number; sideB: number; sideC: number; origin: Point; currentMouse: Point };
+  | { type: 'ROOT_PLACING_ANGLE'; sideA: number; sideB: number; sideC: number; origin: Point; currentMouse: Point }
+  | { type: 'MOVING_SELECTION'; startWorld: Point; currentWorld: Point; targetIds: Set<string> };
+
+// Context menu state
+type ContextMenuState = {
+  x: number;  // Screen coordinates
+  y: number;
+  targetType: 'triangle' | 'edge' | 'selection';
+  targetId?: string;
+} | null;
 
 // Long press duration in milliseconds
 const LONG_PRESS_DURATION = 600;
@@ -66,6 +78,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   onDeleteTriangle,
   onDeleteStandaloneEdge,
   onUpdateStandaloneEdgeLength,
+  onMoveTriangles,
+  onMoveStandaloneEdges,
   rootPlacingMode,
   onRootPlacingComplete,
   onRootPlacingCancel
@@ -73,7 +87,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const longPressTimerRef = useRef<number | null>(null);
-  const [longPressTarget, setLongPressTarget] = useState<{ type: 'triangle' | 'edge'; id: string; progress: number } | null>(null);
+  const longPressStartPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Multi-selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 
   // Delete confirmation state
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'triangle' | 'edge'; id: string; name: string } | null>(null);
@@ -161,47 +181,51 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     return snapPoint || mouse;
   }, [findSnapPoint]);
 
-  // Long press handlers
-  const startLongPress = useCallback((type: 'triangle' | 'edge', id: string) => {
-    // Clear any existing timer
+  // Long press handlers - now opens context menu instead of delete dialog
+  const startEntityLongPress = useCallback((type: 'triangle' | 'edge', id: string, screenX: number, screenY: number) => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
     }
+    longPressStartPosRef.current = { x: screenX, y: screenY };
 
-    // Start progress animation
-    setLongPressTarget({ type, id, progress: 0 });
+    longPressTimerRef.current = window.setTimeout(() => {
+      // Show context menu on long press
+      setContextMenu({ x: screenX, y: screenY, targetType: type, targetId: id });
+      longPressTimerRef.current = null;
+    }, LONG_PRESS_DURATION);
+  }, []);
 
-    // Animate progress
-    const startTime = Date.now();
-    const animateProgress = () => {
-      const elapsed = Date.now() - startTime;
-      const progress = Math.min(elapsed / LONG_PRESS_DURATION, 1);
+  // Long press on background - starts SELECT_RECT mode
+  const startBackgroundLongPress = useCallback((screenX: number, screenY: number, worldPoint: Point) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+    longPressStartPosRef.current = { x: screenX, y: screenY };
 
-      if (progress < 1) {
-        setLongPressTarget({ type, id, progress });
-        longPressTimerRef.current = window.setTimeout(animateProgress, 16); // ~60fps
-      } else {
-        // Long press completed - show confirmation dialog
-        setLongPressTarget(null);
-        if (type === 'triangle') {
-          const t = triangles.find(tri => tri.id === id);
-          setDeleteConfirm({ type, id, name: t?.name || 'Triangle' });
-        } else if (type === 'edge') {
-          setDeleteConfirm({ type, id, name: 'Edge' });
-        }
-        setDeleteInput('');
-      }
-    };
-
-    longPressTimerRef.current = window.setTimeout(animateProgress, 16);
-  }, [triangles]);
+    longPressTimerRef.current = window.setTimeout(() => {
+      // Start selection rectangle
+      setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+      longPressTimerRef.current = null;
+    }, LONG_PRESS_DURATION);
+  }, []);
 
   const cancelLongPress = useCallback(() => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
-    setLongPressTarget(null);
+    longPressStartPosRef.current = null;
+  }, []);
+
+  // Right-click handler for context menu
+  const handleContextMenu = useCallback((e: React.MouseEvent | Konva.KonvaEventObject<MouseEvent>, type: 'triangle' | 'edge' | 'selection', id?: string) => {
+    if ('evt' in e) {
+      e.evt.preventDefault();
+      setContextMenu({ x: e.evt.clientX, y: e.evt.clientY, targetType: type, targetId: id });
+    } else {
+      e.preventDefault();
+      setContextMenu({ x: e.clientX, y: e.clientY, targetType: type, targetId: id });
+    }
   }, []);
 
   // Cleanup timer on unmount
@@ -266,33 +290,148 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     return { id: generateId(), x: world.x, y: world.y };
   }, [stageToWorld]);
 
+  // Calculate bounding box of all entities
+  const getEntitiesBounds = useCallback(() => {
+    const allPoints: Point[] = [];
+
+    // Collect all triangle vertices
+    triangles.forEach(t => {
+      allPoints.push(t.p1, t.p2, t.p3);
+    });
+
+    // Collect all standalone edge endpoints
+    standaloneEdges.forEach(e => {
+      allPoints.push(e.p1, e.p2);
+    });
+
+    if (allPoints.length === 0) {
+      // No entities, return default bounds
+      return null;
+    }
+
+    const xs = allPoints.map(p => p.x);
+    const ys = allPoints.map(p => p.y);
+
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Add padding
+    const padding = Math.max(maxX - minX, maxY - minY) * 0.2 || 5;
+
+    return {
+      minX: minX - padding,
+      maxX: maxX + padding,
+      minY: minY - padding,
+      maxY: maxY + padding,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2,
+      width: maxX - minX + padding * 2,
+      height: maxY - minY + padding * 2
+    };
+  }, [triangles, standaloneEdges]);
+
+  // Track if this is the first render with entities
+  const hasInitializedView = useRef(false);
+
   // Initialize stage size
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         setStageSize({ width: rect.width, height: rect.height });
-        
-        // Calculate initial scale to fit world bounds
-        const scaleX = rect.width / 1000;
-        const scaleY = rect.height / 800;
-        const initialScale = Math.min(scaleX, scaleY) * 0.9;
-        setStageScale(initialScale);
-        
-        // Center the view
-        const centerX = rect.width / 2 - (1000 * initialScale) / 2;
-        const centerY = rect.height / 2 - (800 * initialScale) / 2;
-        setStagePosition({ x: centerX, y: centerY });
+
+        // Only set initial scale/position on first load
+        if (!hasInitializedView.current) {
+          // Calculate initial scale to fit world bounds
+          const scaleX = rect.width / 1000;
+          const scaleY = rect.height / 800;
+          const initialScale = Math.min(scaleX, scaleY) * 0.9;
+          setStageScale(initialScale);
+
+          // Center the view
+          const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+          const centerY = rect.height / 2 - (800 * initialScale) / 2;
+          setStagePosition({ x: centerX, y: centerY });
+        }
       }
     };
-    
+
     updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
+  // Auto-center on entities when they first appear (initial load)
+  useEffect(() => {
+    if (hasInitializedView.current) return;
+    if (triangles.length === 0 && standaloneEdges.length === 0) return;
+    if (!containerRef.current) return;
+
+    const bounds = getEntitiesBounds();
+    if (!bounds) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+
+    // Calculate scale to fit entities
+    const entityStageWidth = bounds.width * (1000 / worldBounds.w);
+    const entityStageHeight = bounds.height * (800 / worldBounds.h);
+
+    const scaleX = rect.width / entityStageWidth;
+    const scaleY = rect.height / entityStageHeight;
+    const fitScale = Math.min(scaleX, scaleY) * 0.8; // 80% to leave margin
+
+    // Convert entity center to stage coordinates
+    const centerStage = worldToStage(bounds.centerX, bounds.centerY);
+
+    // Position stage so that entity center is at screen center
+    const newX = rect.width / 2 - centerStage.x * fitScale;
+    const newY = rect.height / 2 - centerStage.y * fitScale;
+
+    setStageScale(fitScale);
+    setStagePosition({ x: newX, y: newY });
+
+    hasInitializedView.current = true;
+  }, [triangles, standaloneEdges, getEntitiesBounds, worldToStage]);
+
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.evt.button === 0 && !editingDim) {
+      // If in moving selection mode, confirm the move on click
+      if (interaction.type === 'MOVING_SELECTION') {
+        const { startWorld, currentWorld, targetIds } = interaction;
+        const dx = currentWorld.x - startWorld.x;
+        const dy = currentWorld.y - startWorld.y;
+
+        addLog(`MOVE CONFIRM: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
+
+        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+          const triangleIds: string[] = [];
+          const edgeIds: string[] = [];
+
+          targetIds.forEach(id => {
+            if (triangles.find(t => t.id === id)) {
+              triangleIds.push(id);
+            } else if (standaloneEdges.find(edge => edge.id === id)) {
+              edgeIds.push(id);
+            }
+          });
+
+          addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
+
+          if (triangleIds.length > 0 && onMoveTriangles) {
+            addLog(`Calling onMoveTriangles`);
+            onMoveTriangles(triangleIds, dx, dy);
+          }
+          if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+            addLog(`Calling onMoveStandaloneEdges`);
+            onMoveStandaloneEdges(edgeIds, dx, dy);
+          }
+        }
+
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
       // If in root placing origin mode, set the origin
       if (interaction.type === 'ROOT_PLACING_ORIGIN') {
         const origin = getWorldPoint(e);
@@ -403,6 +542,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         setInteraction({ type: 'IDLE' });
         return;
       }
+      // Start long press timer for SELECT_RECT
+      const worldPoint = getWorldPoint(e);
+      startBackgroundLongPress(e.evt.clientX, e.evt.clientY, worldPoint);
       setInteraction({ type: 'PAN_READY', startX: e.evt.clientX, startY: e.evt.clientY });
     }
   };
@@ -435,9 +577,27 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   };
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (interaction.type === 'PAN_READY') {
+    // Cancel long press if mouse moved too much
+    if (longPressStartPosRef.current && longPressTimerRef.current) {
+      const dx = e.evt.clientX - longPressStartPosRef.current.x;
+      const dy = e.evt.clientY - longPressStartPosRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+        cancelLongPress();
+      }
+    }
+
+    if (interaction.type === 'SELECT_RECT') {
+      const currentWorld = getWorldPoint(e);
+      setInteraction({ ...interaction, currentWorld });
+      return;
+    } else if (interaction.type === 'MOVING_SELECTION') {
+      const currentWorld = getWorldPoint(e);
+      setInteraction({ ...interaction, currentWorld });
+      return;
+    } else if (interaction.type === 'PAN_READY') {
       const dist = Math.sqrt(Math.pow(e.evt.clientX - interaction.startX, 2) + Math.pow(e.evt.clientY - interaction.startY, 2));
       if (dist > 3) {
+        cancelLongPress(); // Cancel long press when starting to pan
         setInteraction({ type: 'PANNING', lastX: e.evt.clientX, lastY: e.evt.clientY });
       }
     } else if (interaction.type === 'PANNING') {
@@ -475,7 +635,95 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     }
   };
 
+  // Check if a triangle is inside a selection rectangle
+  const isTriangleInRect = useCallback((t: RenderedTriangle, minX: number, maxX: number, minY: number, maxY: number): boolean => {
+    // Check if centroid is inside rectangle
+    const cx = (t.p1.x + t.p2.x + t.p3.x) / 3;
+    const cy = (t.p1.y + t.p2.y + t.p3.y) / 3;
+    return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
+  }, []);
+
+  // Check if a standalone edge is inside a selection rectangle
+  const isEdgeInRect = useCallback((e: StandaloneEdge, minX: number, maxX: number, minY: number, maxY: number): boolean => {
+    const cx = (e.p1.x + e.p2.x) / 2;
+    const cy = (e.p1.y + e.p2.y) / 2;
+    return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
+  }, []);
+
   const handleMouseUp = () => {
+    cancelLongPress();
+
+    // Handle MOVING_SELECTION completion
+    if (interaction.type === 'MOVING_SELECTION') {
+      const { startWorld, currentWorld, targetIds } = interaction;
+      const dx = currentWorld.x - startWorld.x;
+      const dy = currentWorld.y - startWorld.y;
+
+      addLog(`MOVE: dx=${dx.toFixed(2)}, dy=${dy.toFixed(2)}, targets=${targetIds.size}`);
+
+      // Only move if there's actual displacement
+      if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+        const triangleIds: string[] = [];
+        const edgeIds: string[] = [];
+
+        targetIds.forEach(id => {
+          if (triangles.find(t => t.id === id)) {
+            triangleIds.push(id);
+          } else if (standaloneEdges.find(e => e.id === id)) {
+            edgeIds.push(id);
+          }
+        });
+
+        addLog(`MOVE: triangles=${triangleIds.length}, edges=${edgeIds.length}`);
+
+        if (triangleIds.length > 0 && onMoveTriangles) {
+          addLog(`Calling onMoveTriangles`);
+          onMoveTriangles(triangleIds, dx, dy);
+        }
+        if (edgeIds.length > 0 && onMoveStandaloneEdges) {
+          addLog(`Calling onMoveStandaloneEdges`);
+          onMoveStandaloneEdges(edgeIds, dx, dy);
+        }
+      } else {
+        addLog(`MOVE: displacement too small`);
+      }
+
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    // Handle SELECT_RECT completion
+    if (interaction.type === 'SELECT_RECT') {
+      const { startWorld, currentWorld } = interaction;
+      const minX = Math.min(startWorld.x, currentWorld.x);
+      const maxX = Math.max(startWorld.x, currentWorld.x);
+      const minY = Math.min(startWorld.y, currentWorld.y);
+      const maxY = Math.max(startWorld.y, currentWorld.y);
+
+      // Only select if rectangle is big enough
+      if (Math.abs(maxX - minX) > 0.1 || Math.abs(maxY - minY) > 0.1) {
+        const newSelection = new Set<string>();
+
+        // Find triangles inside rectangle
+        triangles.forEach(t => {
+          if (isTriangleInRect(t, minX, maxX, minY, maxY)) {
+            newSelection.add(t.id);
+          }
+        });
+
+        // Find standalone edges inside rectangle
+        standaloneEdges.forEach(e => {
+          if (isEdgeInRect(e, minX, maxX, minY, maxY)) {
+            newSelection.add(e.id);
+          }
+        });
+
+        setSelectedIds(newSelection);
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
     // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
     if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
         interaction.type === 'ROOT_PLACING_ANGLE' ||
@@ -494,6 +742,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       if (onBackgroundClick) {
         onBackgroundClick();
       }
+      // Clear multi-selection on background click
+      setSelectedIds(new Set());
     }
     setInteraction({ type: 'IDLE' });
   };
@@ -814,8 +1064,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   // Render Triangle Fill only (for bottom layer)
   const renderTriangleFill = (t: RenderedTriangle) => {
     const isSelected = selectedTriangleId === t.id;
+    const isMultiSelected = selectedIds.has(t.id);
     const isEditingAnyEdge = editingDim?.tId === t.id;
-    const isLongPressing = longPressTarget?.type === 'triangle' && longPressTarget?.id === t.id;
 
     const sp1 = worldToStage(t.p1.x, t.p1.y);
     const sp2 = worldToStage(t.p2.x, t.p2.y);
@@ -832,13 +1082,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           context.closePath();
           context.fillStrokeShape(shape);
         }}
-        fill={isLongPressing ? "#ef4444" : "#94a3b8"}
-        opacity={isLongPressing ? (0.2 + longPressTarget!.progress * 0.4) : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
-        stroke={isLongPressing ? "#ef4444" : "#64748b"}
-        strokeWidth={isSelected || isLongPressing ? 2 : 1}
+        fill={isMultiSelected ? "#3b82f6" : "#94a3b8"}
+        opacity={isMultiSelected ? 0.4 : (isEditingAnyEdge ? 0.1 : (isSelected ? 0.4 : 0.2))}
+        stroke={isMultiSelected ? "#2563eb" : "#64748b"}
+        strokeWidth={isSelected || isMultiSelected ? 2 : 1}
         onMouseDown={(e) => {
           if (e.evt.button === 0) {
-            startLongPress('triangle', t.id);
+            startEntityLongPress('triangle', t.id, e.evt.clientX, e.evt.clientY);
           }
         }}
         onMouseUp={() => {
@@ -850,6 +1100,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         onClick={() => {
           cancelLongPress();
           onSelectTriangle(t.id);
+        }}
+        onContextMenu={(e) => {
+          e.evt.preventDefault();
+          handleContextMenu(e, 'triangle', t.id);
         }}
       />
     );
@@ -998,18 +1252,18 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const textWidth = lenText.length * charWidth;
     const endpointRadius = Math.max(4, fontSize * 0.4);
 
-    const isLongPressing = longPressTarget?.type === 'edge' && longPressTarget?.id === edge.id;
+    const isMultiSelected = selectedIds.has(edge.id);
 
     return (
       <Group key={`standalone-${edge.id}`}>
-        {/* Hit area for double-click on edge body (to create triangle) and long press to delete */}
+        {/* Hit area for double-click on edge body (to create triangle) and long press for context menu */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
           stroke="transparent"
           strokeWidth={20}
           onMouseDown={(e) => {
             if (e.evt.button === 0) {
-              startLongPress('edge', edge.id);
+              startEntityLongPress('edge', edge.id, e.evt.clientX, e.evt.clientY);
             }
           }}
           onMouseUp={() => {
@@ -1030,13 +1284,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
             });
           }}
+          onContextMenu={(e) => {
+            e.evt.preventDefault();
+            handleContextMenu(e, 'edge', edge.id);
+          }}
         />
         {/* Visible edge */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={isLongPressing ? "#ef4444" : "#3b82f6"}
-          strokeWidth={isLongPressing ? 3 : 2}
-          opacity={isLongPressing ? (0.5 + longPressTarget!.progress * 0.5) : 1}
+          stroke={isMultiSelected ? "#2563eb" : "#3b82f6"}
+          strokeWidth={isMultiSelected ? 3 : 2}
         />
         {/* Endpoint 1 - double-click to extend */}
         <Circle
@@ -1413,14 +1670,103 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     return null;
   };
 
+  // Render moving selection preview
+  const renderMovingPreview = () => {
+    if (interaction.type !== 'MOVING_SELECTION') return null;
+
+    const { startWorld, currentWorld, targetIds } = interaction;
+    const dx = currentWorld.x - startWorld.x;
+    const dy = currentWorld.y - startWorld.y;
+
+    const elements: React.ReactElement[] = [];
+
+    // Draw ghost triangles
+    targetIds.forEach(id => {
+      const t = triangles.find(tri => tri.id === id);
+      if (t) {
+        const sp1 = worldToStage(t.p1.x + dx, t.p1.y + dy);
+        const sp2 = worldToStage(t.p2.x + dx, t.p2.y + dy);
+        const sp3 = worldToStage(t.p3.x + dx, t.p3.y + dy);
+
+        elements.push(
+          <Shape
+            key={`moving-${t.id}`}
+            sceneFunc={(context, shape) => {
+              context.beginPath();
+              context.moveTo(sp1.x, sp1.y);
+              context.lineTo(sp2.x, sp2.y);
+              context.lineTo(sp3.x, sp3.y);
+              context.closePath();
+              context.fillStrokeShape(shape);
+            }}
+            fill="#3b82f6"
+            opacity={0.3}
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dash={[4, 4]}
+          />
+        );
+      }
+
+      const edge = standaloneEdges.find(e => e.id === id);
+      if (edge) {
+        const sp1 = worldToStage(edge.p1.x + dx, edge.p1.y + dy);
+        const sp2 = worldToStage(edge.p2.x + dx, edge.p2.y + dy);
+
+        elements.push(
+          <Line
+            key={`moving-edge-${edge.id}`}
+            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dash={[4, 4]}
+            opacity={0.6}
+          />
+        );
+      }
+    });
+
+    return <Group>{elements}</Group>;
+  };
+
+  // Render selection rectangle
+  const renderSelectRect = () => {
+    if (interaction.type !== 'SELECT_RECT') return null;
+
+    const { startWorld, currentWorld } = interaction;
+    const sp1 = worldToStage(startWorld.x, startWorld.y);
+    const sp2 = worldToStage(currentWorld.x, currentWorld.y);
+
+    const x = Math.min(sp1.x, sp2.x);
+    const y = Math.min(sp1.y, sp2.y);
+    const width = Math.abs(sp2.x - sp1.x);
+    const height = Math.abs(sp2.y - sp1.y);
+
+    return (
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="#3b82f6"
+        opacity={0.2}
+        stroke="#3b82f6"
+        strokeWidth={1}
+        dash={[4, 4]}
+      />
+    );
+  };
+
   const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING'
     ? 'grabbing'
-    : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE')
+    : interaction.type === 'MOVING_SELECTION'
+    ? 'move'
+    : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE' || interaction.type === 'SELECT_RECT')
     ? 'crosshair'
     : 'default';
 
   return (
-    <div ref={containerRef} className="flex-1 h-full relative bg-slate-50 overflow-hidden select-none">
+    <div ref={containerRef} className="flex-1 h-full relative bg-slate-100 overflow-hidden select-none">
       <Stage
         ref={stageRef}
         width={stageSize.width}
@@ -1441,14 +1787,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           {/* Render standalone edges */}
           {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
           {/* Render all triangle fills first (bottom layer) */}
-          {triangles.map((t) => renderTriangleFill(t, false))}
+          {triangles.map((t) => renderTriangleFill(t))}
           {/* Render selected edge highlight (above fills, below labels) */}
           {renderSelectedEdgeHighlight()}
           {/* Render all labels on top (so they're clickable) */}
-          {triangles.map((t) => renderTriangleLabels(t, false))}
+          {triangles.map((t) => renderTriangleLabels(t))}
           {renderEdgeDrawingGhost()}
           {renderDragGhost()}
           {renderRootPlacingPreview()}
+          {renderSelectRect()}
+          {renderMovingPreview()}
         </Layer>
       </Stage>
 
@@ -1474,7 +1822,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         </button>
       </div>
 
-      <div className="absolute bottom-4 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
+      <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
         <p>• <span className="text-blue-600 font-bold">辺ダブルクリック</span>: 三角形を追加</p>
         <p>• <span className="text-blue-600 font-bold">寸法クリック</span>: 数値を編集</p>
@@ -1694,7 +2042,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       {/* Debug Console */}
       <div className="absolute bottom-0 left-0 right-0 h-24 bg-slate-900 text-green-400 font-mono text-xs overflow-y-auto border-t border-slate-700">
         <div className="sticky top-0 bg-slate-800 px-2 py-1 flex justify-between items-center border-b border-slate-700">
-          <span className="text-slate-400">Debug: <span className="text-yellow-400">{interaction.type}</span></span>
+          <span className="text-slate-400">Debug: <span className="text-yellow-400">{interaction.type}</span> | Selected: <span className="text-cyan-400">{selectedIds.size}</span></span>
           <button
             onClick={() => setDebugLogs([])}
             className="text-slate-500 hover:text-white px-2"
@@ -1709,6 +2057,105 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           {debugLogs.length === 0 && <div className="text-slate-500">No logs...</div>}
         </div>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50 min-w-32"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={() => setContextMenu(null)}
+        >
+          {/* Move option - only show if something is selected or targeting a specific entity */}
+          {((contextMenu.targetType === 'selection' && selectedIds.size > 0) ||
+            (contextMenu.targetType === 'triangle' && contextMenu.targetId) ||
+            (contextMenu.targetType === 'edge' && contextMenu.targetId)) && (
+            <button
+              className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-blue-600"
+              onClick={(e) => {
+                e.stopPropagation();
+
+                // Determine the IDs to move
+                let idsToMove: Set<string>;
+                if (contextMenu.targetType === 'triangle' && contextMenu.targetId) {
+                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
+                } else if (contextMenu.targetType === 'edge' && contextMenu.targetId) {
+                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
+                } else {
+                  idsToMove = selectedIds;
+                }
+
+                // Update selectedIds for visual feedback
+                setSelectedIds(idsToMove);
+
+                addLog(`Move clicked: idsToMove=${idsToMove.size}, ids=[${Array.from(idsToMove).join(',')}]`);
+
+                // Start moving mode - convert screen coordinates to world coordinates
+                const stage = stageRef.current;
+                const container = containerRef.current;
+                if (stage && container) {
+                  const containerRect = container.getBoundingClientRect();
+                  // Convert screen coordinates to stage-relative coordinates
+                  const stageRelativeX = contextMenu.x - containerRect.left;
+                  const stageRelativeY = contextMenu.y - containerRect.top;
+                  // Convert to internal stage coordinates
+                  const stageX = (stageRelativeX - stage.x()) / stage.scaleX();
+                  const stageY = (stageRelativeY - stage.y()) / stage.scaleY();
+                  const world = stageToWorld(stageX, stageY);
+                  const startWorld: Point = { id: generateId(), x: world.x, y: world.y };
+                  addLog(`Start MOVING_SELECTION: world=(${world.x.toFixed(2)}, ${world.y.toFixed(2)})`);
+                  // Store targetIds in interaction to avoid async state issues
+                  setInteraction({ type: 'MOVING_SELECTION', startWorld, currentWorld: startWorld, targetIds: idsToMove });
+                } else {
+                  addLog(`Move failed: stage=${!!stage}, container=${!!container}`);
+                }
+                setContextMenu(null);
+              }}
+            >
+              <span>✥</span>
+              <span>移動</span>
+            </button>
+          )}
+          {/* Delete option */}
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-red-600"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (contextMenu.targetType === 'triangle' && contextMenu.targetId && onDeleteTriangle) {
+                const t = triangles.find(tri => tri.id === contextMenu.targetId);
+                setDeleteConfirm({ type: 'triangle', id: contextMenu.targetId, name: t?.name || 'Triangle' });
+              } else if (contextMenu.targetType === 'edge' && contextMenu.targetId && onDeleteStandaloneEdge) {
+                setDeleteConfirm({ type: 'edge', id: contextMenu.targetId, name: 'Edge' });
+              } else if (contextMenu.targetType === 'selection' && selectedIds.size > 0) {
+                // Delete all selected items
+                selectedIds.forEach(id => {
+                  if (triangles.find(t => t.id === id)) {
+                    onDeleteTriangle?.(id);
+                  } else if (standaloneEdges.find(e => e.id === id)) {
+                    onDeleteStandaloneEdge?.(id);
+                  }
+                });
+                setSelectedIds(new Set());
+              }
+              setContextMenu(null);
+            }}
+          >
+            <span>🗑</span>
+            <span>削除</span>
+          </button>
+        </div>
+      )}
+
+      {/* Click outside to close context menu */}
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContextMenu(null);
+          }}
+        />
+      )}
     </div>
   );
 };
