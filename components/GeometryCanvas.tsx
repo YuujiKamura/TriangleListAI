@@ -12,6 +12,7 @@ import { DebugConsole } from './ui/DebugConsole';
 import { EdgeActionButton } from './ui/EdgeActionButton';
 import { TriangleActionButton } from './ui/TriangleActionButton';
 import { usePointer, GESTURE_CONSTANTS, PointerInfo } from '../hooks/usePointer';
+import { clickHandlers, interactiveHandlers, ClickTapEvent } from '../hooks/useKonvaHandlers';
 
 interface GeometryCanvasProps {
   triangles: RenderedTriangle[];
@@ -246,6 +247,33 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
     };
   }, []);
+
+  // ESC key cancels creation mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        const creationModes = [
+          'PHANTOM_PLACING',
+          'VERTEX_RESHAPING',
+          'DRAWING_EDGE',
+          'STANDALONE_EDGE_PLACING',
+          'EXTENDING_EDGE',
+          'ROOT_PLACING_ORIGIN',
+          'ROOT_PLACING_ANGLE'
+        ];
+        if (creationModes.includes(interaction.type)) {
+          e.preventDefault();
+          setInteraction({ type: 'IDLE' });
+          // Also notify parent to cancel root placing mode if applicable
+          if ((interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE') && onRootPlacingCancel) {
+            onRootPlacingCancel();
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [interaction.type, onRootPlacingCancel]);
 
   // Enter root placing mode when rootPlacingMode is set
   useEffect(() => {
@@ -504,16 +532,39 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const pinchBaseScaleRef = useRef<number>(1);
   const pinchBasePosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
+  // Helper to check if we're in a creation mode
+  const isInCreationMode = useCallback(() => {
+    return interaction.type === 'PHANTOM_PLACING' ||
+      interaction.type === 'VERTEX_RESHAPING' ||
+      interaction.type === 'DRAWING_EDGE' ||
+      interaction.type === 'STANDALONE_EDGE_PLACING' ||
+      interaction.type === 'EXTENDING_EDGE' ||
+      interaction.type === 'ROOT_PLACING_ORIGIN' ||
+      interaction.type === 'ROOT_PLACING_ANGLE';
+  }, [interaction.type]);
+
   // usePointer hook for unified gesture handling
   const pointerHandlers = usePointer({
-    onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTapTrigger?: boolean) => {
-      const targetName = target.name();
-      addLog(`PointerDown: type=${pointer.pointerType}, target=${targetName}, doubleTap=${isDoubleTapTrigger}`);
+    isInCreationMode,
 
-      // If this is the double-click trigger (mouse only), skip confirmation logic
-      // The double-tap callback already set the interaction state (e.g., DRAWING_EDGE)
-      // and we just need to track pointer movement, not confirm immediately
-      if (isDoubleTapTrigger) {
+    onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTap?: boolean) => {
+      const targetName = target.name();
+      addLog(`PointerDown: type=${pointer.pointerType}, target=${targetName}, doubleTap=${isDoubleTap}`);
+
+      // Creation mode confirmation: ONLY on double-tap
+      // Single tap in creation mode does nothing (ghost follows pointer movement)
+      const inCreationMode = interaction.type === 'PHANTOM_PLACING' ||
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
+        interaction.type === 'EXTENDING_EDGE' ||
+        interaction.type === 'ROOT_PLACING_ORIGIN' ||
+        interaction.type === 'ROOT_PLACING_ANGLE';
+
+      // In creation mode: require double-tap to confirm, single-tap does nothing
+      if (inCreationMode && !isDoubleTap) {
+        // Single tap in creation mode - just update position (already done by onPointerMove)
+        // Don't confirm, don't cancel
         return;
       }
 
@@ -738,83 +789,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     onPointerUp: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
       addLog(`PointerUp: type=${pointer.pointerType}, id=${pointer.id}, interaction=${interaction.type}`);
 
-      // Handle confirmation for touch-based interactions (finger lift = confirm)
-      if (pointer.pointerType === 'touch') {
-        if (interaction.type === 'DRAWING_EDGE') {
-          if (onAddStandaloneEdge) {
-            const { startPoint, currentMouse } = interaction;
-            const snappedMouse = applySnap(currentMouse, [startPoint]);
-            const len = distance(startPoint, snappedMouse);
-            addLog(`TouchEnd DRAWING_EDGE: len=${len.toFixed(2)}`);
-            if (len > 0.1) {
-              onAddStandaloneEdge(startPoint, snappedMouse);
-            }
-          }
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-
-        if (interaction.type === 'PHANTOM_PLACING') {
-          if (onAddAttachedTriangle) {
-            const { p1, p2, currentMouse, tId, index } = interaction;
-            const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
-            if (!isOccupied) {
-              const snappedMouse = applySnap(currentMouse, [p1, p2]);
-              const sideLeft = distance(p1, snappedMouse);
-              const sideRight = distance(p2, snappedMouse);
-              const flip = isFlipSide(p1, p2, snappedMouse);
-              if (sideLeft > 0 && sideRight > 0) {
-                onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
-              }
-            }
-          }
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-
-        if (interaction.type === 'STANDALONE_EDGE_PLACING') {
-          if (onAddTriangleFromEdge) {
-            const { edgeId, p1, p2, currentMouse } = interaction;
-            const snappedMouse = applySnap(currentMouse, [p1, p2]);
-            const sideLeft = distance(p1, snappedMouse);
-            const sideRight = distance(p2, snappedMouse);
-            const flip = isFlipSide(p1, p2, snappedMouse);
-            if (sideLeft > 0 && sideRight > 0) {
-              onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
-            }
-          }
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-
-        if (interaction.type === 'VERTEX_RESHAPING') {
-          if (onVertexReshape) {
-            const { p1, p2, currentMouse, tId } = interaction;
-            const snappedMouse = applySnap(currentMouse, [p1, p2]);
-            const sideLeft = distance(p1, snappedMouse);
-            const sideRight = distance(p2, snappedMouse);
-            const flip = isFlipSide(p1, p2, snappedMouse);
-            if (sideLeft > 0 && sideRight > 0) {
-              onVertexReshape(tId, sideLeft, sideRight, flip);
-            }
-          }
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-
-        if (interaction.type === 'EXTENDING_EDGE') {
-          if (onAddStandaloneEdge) {
-            const { fromPoint, currentMouse } = interaction;
-            const snappedMouse = applySnap(currentMouse, [fromPoint]);
-            const len = distance(fromPoint, snappedMouse);
-            if (len > 0.1) {
-              onAddStandaloneEdge(fromPoint, snappedMouse);
-            }
-          }
-          setInteraction({ type: 'IDLE' });
-          return;
-        }
-      }
+      // Creation modes: finger lift does NOT confirm anymore
+      // User must double-tap to confirm (consistent for both mouse and touch)
 
       // Handle MOVING_SELECTION completion
       if (interaction.type === 'MOVING_SELECTION') {
@@ -1149,54 +1125,33 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             points={[sp1.x, sp1.y, sp2.x, sp2.y]}
             stroke="transparent"
             strokeWidth={20}
-            onClick={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              // Allow edge selection even if occupied (for highlight)
-              onEdgeSelect(t.id, index);
-            }}
-            onTap={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              onEdgeSelect(t.id, index);
-            }}
+            {...clickHandlers(
+              // Single click/tap: select edge
+              (e) => {
+                e.evt.stopPropagation();
+                e.cancelBubble = true;
+                onEdgeSelect(t.id, index);
+              },
+              // Double click/tap: enter phantom placing mode
+              !isOccupied ? (e) => {
+                e.evt.stopPropagation();
+                e.cancelBubble = true;
+                const currentMouse = getWorldPoint(e);
+                setInteraction({
+                  type: 'PHANTOM_PLACING',
+                  tId: t.id,
+                  index,
+                  p1: pStart,
+                  p2: pEnd,
+                  currentMouse
+                });
+              } : undefined
+            )}
             onPointerDown={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
                 handleEdgePointerDown(e, t.id, index, pStart, pEnd);
-              }
-            }}
-            onDblClick={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              if (!isOccupied) {
-                // Enter phantom placing mode
-                const currentMouse = getWorldPoint(e);
-                setInteraction({
-                  type: 'PHANTOM_PLACING',
-                  tId: t.id,
-                  index,
-                  p1: pStart,
-                  p2: pEnd,
-                  currentMouse
-                });
-              }
-            }}
-            onDblTap={(e) => {
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              if (!isOccupied) {
-                // Enter phantom placing mode
-                const currentMouse = getWorldPoint(e);
-                setInteraction({
-                  type: 'PHANTOM_PLACING',
-                  tId: t.id,
-                  index,
-                  p1: pStart,
-                  p2: pEnd,
-                  currentMouse
-                });
               }
             }}
           />
@@ -1224,8 +1179,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               strokeWidth={3}
               offsetX={labelWidth / 2}
               offsetY={fontSize / 2}
-              onClick={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
-              onTap={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
+              {...clickHandlers(() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize))}
             />
           </Group>
         ) : null}
@@ -1312,26 +1266,19 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         stroke="white"
         strokeWidth={1}
         opacity={0.7}
-        onDblClick={(e) => {
-          e.evt.stopPropagation();
-          // Start extending edge from this vertex
-          setInteraction({
-            type: 'EXTENDING_EDGE',
-            fromEdgeId: triangleId, // Using triangle ID as reference
-            fromPoint: point,
-            currentMouse: point
-          });
-        }}
-        onDblTap={(e) => {
-          e.evt.stopPropagation();
-          // Start extending edge from this vertex
-          setInteraction({
-            type: 'EXTENDING_EDGE',
-            fromEdgeId: triangleId, // Using triangle ID as reference
-            fromPoint: point,
-            currentMouse: point
-          });
-        }}
+        {...clickHandlers(
+          undefined,
+          // Double click/tap: start extending edge from this vertex
+          (e) => {
+            e.evt.stopPropagation();
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: triangleId,
+              fromPoint: point,
+              currentMouse: point
+            });
+          }
+        )}
       />
     );
   };
@@ -1364,36 +1311,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           name={`triangle-label-${t.id}`}
           x={labelPos.x}
           y={labelPos.y}
-          onClick={(e) => {
-            e.evt.stopPropagation();
-            onSelectTriangle(t.id);
-          }}
-          onTap={(e) => {
-            e.evt.stopPropagation();
-            onSelectTriangle(t.id);
-          }}
-          onDblClick={(e) => {
-            e.evt.stopPropagation();
-            // Enter vertex reshaping mode
-            setInteraction({
-              type: 'VERTEX_RESHAPING',
-              tId: t.id,
-              p1: t.p1,
-              p2: t.p2,
-              currentMouse: t.p3
-            });
-          }}
-          onDblTap={(e) => {
-            e.evt.stopPropagation();
-            // Enter vertex reshaping mode
-            setInteraction({
-              type: 'VERTEX_RESHAPING',
-              tId: t.id,
-              p1: t.p1,
-              p2: t.p2,
-              currentMouse: t.p3
-            });
-          }}
+          {...clickHandlers(
+            // Single click/tap: select triangle
+            (e) => {
+              e.evt.stopPropagation();
+              onSelectTriangle(t.id);
+            },
+            // Double click/tap: enter vertex reshaping mode
+            (e) => {
+              e.evt.stopPropagation();
+              setInteraction({
+                type: 'VERTEX_RESHAPING',
+                tId: t.id,
+                p1: t.p1,
+                p2: t.p2,
+                currentMouse: t.p3
+              });
+            }
+          )}
         >
           <Circle
             x={0}
@@ -1701,26 +1636,18 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           fill="#3b82f6"
           stroke="white"
           strokeWidth={2}
-          onDblClick={(e) => {
-            e.evt.stopPropagation();
-            // Start extending from this endpoint
-            setInteraction({
-              type: 'EXTENDING_EDGE',
-              fromEdgeId: edge.id,
-              fromPoint: edge.p1,
-              currentMouse: edge.p1
-            });
-          }}
-          onDblTap={(e) => {
-            e.evt.stopPropagation();
-            // Start extending from this endpoint
-            setInteraction({
-              type: 'EXTENDING_EDGE',
-              fromEdgeId: edge.id,
-              fromPoint: edge.p1,
-              currentMouse: edge.p1
-            });
-          }}
+          {...clickHandlers(
+            undefined,
+            (e) => {
+              e.evt.stopPropagation();
+              setInteraction({
+                type: 'EXTENDING_EDGE',
+                fromEdgeId: edge.id,
+                fromPoint: edge.p1,
+                currentMouse: edge.p1
+              });
+            }
+          )}
         />
         {/* Endpoint 2 - double-click to extend */}
         <Circle
@@ -1730,26 +1657,18 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           fill="#3b82f6"
           stroke="white"
           strokeWidth={2}
-          onDblClick={(e) => {
-            e.evt.stopPropagation();
-            // Start extending from this endpoint
-            setInteraction({
-              type: 'EXTENDING_EDGE',
-              fromEdgeId: edge.id,
-              fromPoint: edge.p2,
-              currentMouse: edge.p2
-            });
-          }}
-          onDblTap={(e) => {
-            e.evt.stopPropagation();
-            // Start extending from this endpoint
-            setInteraction({
-              type: 'EXTENDING_EDGE',
-              fromEdgeId: edge.id,
-              fromPoint: edge.p2,
-              currentMouse: edge.p2
-            });
-          }}
+          {...clickHandlers(
+            undefined,
+            (e) => {
+              e.evt.stopPropagation();
+              setInteraction({
+                type: 'EXTENDING_EDGE',
+                fromEdgeId: edge.id,
+                fromPoint: edge.p2,
+                currentMouse: edge.p2
+              });
+            }
+          )}
         />
         {/* Length label - clickable to edit */}
         {editingEdgeDim?.edgeId !== edge.id && (
@@ -1766,7 +1685,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             strokeWidth={3}
             offsetX={textWidth / 2}
             offsetY={fontSize / 2 + fontSize}
-            onClick={() => handleEdgeLabelClick(edge.id, edge.length, midX, midY - fontSize, fontSize)}
+            {...clickHandlers(() => handleEdgeLabelClick(edge.id, edge.length, midX, midY - fontSize, fontSize))}
           />
         )}
       </Group>

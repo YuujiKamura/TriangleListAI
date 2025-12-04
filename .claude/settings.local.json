@@ -11,7 +11,9 @@
       "Bash(cat:*)",
       "Bash(chmod:*)",
       "Bash(bash:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)"
     ],
     "deny": [],
     "ask": []

@@ -5,6 +5,7 @@ import { PALETTE } from './constants';
 import GeometryCanvas from './components/GeometryCanvas';
 import { Calculator, RefreshCw, Download, Undo2 } from 'lucide-react';
 import { downloadDXF } from './utils/dxfExport';
+import { ConfirmDialog } from './components/ui/ConfirmDialog';
 
 const App: React.FC = () => {
   // State: The Definition is the source of truth
@@ -40,6 +41,9 @@ const App: React.FC = () => {
 
   // Root triangle placement mode
   const [rootPlacingMode, setRootPlacingMode] = useState<{ sideA: number; sideB: number; sideC: number } | null>(null);
+
+  // Clear confirmation dialog
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // Undo history
   const [history, setHistory] = useState<{ defs: TriangleDef[], edges: StandaloneEdge[] }[]>([]);
@@ -472,13 +476,16 @@ const App: React.FC = () => {
   };
 
   const handleClear = () => {
-    if (window.confirm("全てのジオメトリをクリアしますか？")) {
-      saveToHistory();
-      setDefs([]);
-      setStandaloneEdges([]);
-      setSelectedTriangleId(null);
-      setSelectedEdge(null);
-    }
+    setShowClearConfirm(true);
+  };
+
+  const executeClear = () => {
+    saveToHistory();
+    setDefs([]);
+    setStandaloneEdges([]);
+    setSelectedTriangleId(null);
+    setSelectedEdge(null);
+    setShowClearConfirm(false);
   };
 
   const handleBackgroundClick = () => {
@@ -523,6 +530,7 @@ const App: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={handleUndo}
             disabled={history.length === 0}
             className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-40 active:scale-95"
@@ -531,15 +539,26 @@ const App: React.FC = () => {
             <Undo2 size={20} />
           </button>
           <button
-            onClick={() => downloadDXF(geometry.triangles)}
+            type="button"
+            onClick={() => {
+              console.log('DXF button clicked, triangles:', geometry.triangles);
+              console.log('Triangle count:', geometry.triangles.length);
+              if (geometry.triangles.length === 0) {
+                alert('エクスポートする三角形がありません');
+                return;
+              }
+              downloadDXF(geometry.triangles);
+            }}
             className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors active:scale-95"
             title="DXF出力"
           >
             <Download size={20} />
           </button>
           <button
+            type="button"
             onClick={handleClear}
             className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors active:scale-95"
+            title="クリア"
           >
             <RefreshCw size={20} />
           </button>
@@ -636,6 +655,19 @@ const App: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Clear confirmation dialog */}
+      {showClearConfirm && (
+        <ConfirmDialog
+          title="全てクリア"
+          message="全てのジオメトリを削除しますか？この操作は元に戻せます。"
+          confirmText="クリア"
+          cancelText="キャンセル"
+          variant="danger"
+          onConfirm={executeClear}
+          onCancel={() => setShowClearConfirm(false)}
+        />
+      )}
     </div>
   );
 };

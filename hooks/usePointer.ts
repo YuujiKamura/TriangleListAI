@@ -21,15 +21,20 @@ export interface PointerInfo {
 }
 
 export interface GestureCallbacks {
-  // isDoubleTapTrigger: true if this pointerDown is the second click of a double-click (mouse only)
-  onPointerDown?: (pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTapTrigger?: boolean) => void;
+  // isDoubleTap: true if this pointerDown is the second tap of a double-tap
+  onPointerDown?: (pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTap?: boolean) => void;
   onPointerMove?: (pointer: PointerInfo, evt: PointerEvent) => void;
   onPointerUp?: (pointer: PointerInfo, evt: PointerEvent) => void;
   onLongPress?: (clientX: number, clientY: number, target: Konva.Node) => void;
+  // onDoubleTap is called for double-tap on background ONLY when not in creation mode
+  // During creation mode, onPointerDown receives isDoubleTap=true instead
   onDoubleTap?: (clientX: number, clientY: number, target: Konva.Node, evt: PointerEvent) => void;
   onPinchStart?: (centerX: number, centerY: number, distance: number) => void;
   onPinchMove?: (centerX: number, centerY: number, scale: number, distance: number) => void;
   onPinchEnd?: () => void;
+  // Indicates whether we're in a creation mode (PHANTOM_PLACING, DRAWING_EDGE, etc.)
+  // When true, double-tap on background will be passed to onPointerDown with isDoubleTap=true
+  isInCreationMode?: () => boolean;
 }
 
 export function usePointer(callbacks: GestureCallbacks) {
@@ -70,12 +75,13 @@ export function usePointer(callbacks: GestureCallbacks) {
     const now = Date.now();
     const last = lastTapRef.current;
     const targetName = target.name();
-
-    // Only detect double-tap on background (not on edges, triangles, etc.)
-    // Other elements have their own onPointerDblClick handlers
     const isBackground = targetName === 'background-rect' || !targetName;
-    if (!isBackground) {
-      // Reset tap tracking when tapping on non-background elements
+    const inCreationMode = callbacks.isInCreationMode?.() || false;
+
+    // In creation mode: detect double-tap anywhere on background for confirmation
+    // Not in creation mode: only detect double-tap on background to start new edge
+    if (!isBackground && !inCreationMode) {
+      // Reset tap tracking when tapping on non-background elements (except in creation mode)
       lastTapRef.current = null;
       return false;
     }
@@ -89,7 +95,10 @@ export function usePointer(callbacks: GestureCallbacks) {
       if (timeDiff < GESTURE_CONSTANTS.DOUBLE_TAP_INTERVAL &&
           dist < GESTURE_CONSTANTS.DOUBLE_TAP_DISTANCE) {
         lastTapRef.current = null;
-        if (callbacks.onDoubleTap) {
+
+        // In creation mode: don't call onDoubleTap, let onPointerDown handle it
+        // Not in creation mode: call onDoubleTap to start new edge drawing
+        if (!inCreationMode && callbacks.onDoubleTap) {
           callbacks.onDoubleTap(x, y, target, evt);
         }
         return true;

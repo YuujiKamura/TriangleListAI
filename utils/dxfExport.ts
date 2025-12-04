@@ -201,17 +201,54 @@ const createText = (x: number, y: number, text: string, height: number, color: n
   ];
 };
 
-// Download DXF file
-export const downloadDXF = (triangles: RenderedTriangle[], filename: string = 'triangles.dxf'): void => {
-  const dxfContent = generateDXF(triangles);
-  const blob = new Blob([dxfContent], { type: 'application/dxf' });
-  const url = URL.createObjectURL(blob);
+// Download DXF file with Save As dialog
+export const downloadDXF = async (triangles: RenderedTriangle[], filename: string = 'triangles.dxf'): Promise<void> => {
+  console.log('downloadDXF called with', triangles.length, 'triangles, filename:', filename);
 
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  const dxfContent = generateDXF(triangles);
+  console.log('DXF content generated, length:', dxfContent.length);
+
+  // Try using File System Access API (shows Save As dialog)
+  if ('showSaveFilePicker' in window) {
+    try {
+      const handle = await (window as any).showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: 'DXF Files',
+          accept: { 'application/dxf': ['.dxf'] }
+        }]
+      });
+
+      const writable = await handle.createWritable();
+      await writable.write(dxfContent);
+      await writable.close();
+
+      console.log('File saved successfully via File System Access API');
+      return;
+    } catch (err: any) {
+      // User cancelled the dialog or API failed
+      if (err.name === 'AbortError') {
+        console.log('User cancelled save dialog');
+        return;
+      }
+      console.warn('File System Access API failed, falling back:', err);
+    }
+  }
+
+  // Fallback: traditional download (for browsers without File System Access API)
+  console.log('Using fallback download method');
+  const blob = new Blob([dxfContent], { type: 'text/plain;charset=utf-8' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.style.display = 'none';
+  document.body.appendChild(link);
+
+  requestAnimationFrame(() => {
+    link.click();
+    setTimeout(() => {
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    }, 150);
+  });
 };

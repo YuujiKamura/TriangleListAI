@@ -1,6 +1,7 @@
 import React from 'react';
 import { Rect, Line } from 'react-konva';
 import { KonvaEventObject } from 'konva/lib/Node';
+import { useClickHandlers } from '../../hooks/useKonvaHandlers';
 
 interface GridBackgroundProps {
       worldBounds: {
@@ -10,7 +11,7 @@ interface GridBackgroundProps {
             h: number;
       };
       worldToStage: (wx: number, wy: number) => { x: number; y: number };
-      onBackgroundDblClick: (e: KonvaEventObject<MouseEvent>) => void;
+      onBackgroundDblClick: (e: KonvaEventObject<any>) => void;
 }
 
 export const GridBackground: React.FC<GridBackgroundProps> = ({
@@ -18,6 +19,9 @@ export const GridBackground: React.FC<GridBackgroundProps> = ({
       worldToStage,
       onBackgroundDblClick
 }) => {
+      // Use unified handlers to ensure mouse/touch parity
+      const backgroundHandlers = useClickHandlers(undefined, onBackgroundDblClick);
+
       const step = 1;
       const startX = Math.floor(worldBounds.x / step) * step;
       const startY = Math.floor(worldBounds.y / step) * step;
@@ -39,7 +43,7 @@ export const GridBackground: React.FC<GridBackgroundProps> = ({
                   width={bottomRight.x - topLeft.x}
                   height={bottomRight.y - topLeft.y}
                   fill="transparent"
-                  onDblClick={onBackgroundDblClick}
+                  {...backgroundHandlers}
             />
       );
 
