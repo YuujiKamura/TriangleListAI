@@ -1,5 +1,4 @@
 import { RenderedTriangle, Point } from '../types';
-import { distance, calculateNormalizedAngle } from './geometryUtils';
 
 // DXF color constants
 const COLOR_BLUE = 5;      // Blue for triangle numbers
@@ -7,6 +6,11 @@ const COLOR_GRAY = 8;      // Gray for edges and dimensions
 
 // Helper to flip Y coordinate (screen Y is inverted from CAD Y)
 const flipY = (y: number): number => -y;
+
+// Calculate distance between two points
+const distance = (p1: Point, p2: Point): number => {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+};
 
 // Generate DXF file content from triangles
 export const generateDXF = (triangles: RenderedTriangle[]): string => {
@@ -90,8 +94,12 @@ export const generateDXF = (triangles: RenderedTriangle[]): string => {
       const labelX = midX + sign * perpX * offsetDist;
       const labelY = midY + sign * perpY * offsetDist;
 
-      // Calculate angle for text rotation using utility function
-      const angle = calculateNormalizedAngle(dx, dy);
+      // Calculate angle for text rotation
+      let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+      // Keep text readable (not upside down)
+      if (angle > 90 || angle < -90) {
+        angle += 180;
+      }
 
       lines.push(...createText(labelX, labelY, dimText, textHeight, COLOR_GRAY, angle));
     });

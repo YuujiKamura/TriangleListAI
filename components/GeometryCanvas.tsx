@@ -2,16 +2,8 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
 import Konva from 'konva';
 import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
-import { getCentroid, distance, generateId, calculateNormalizedAngle, shouldPlaceOnLeft } from '../utils/geometryUtils';
-import { modelToScreen, screenToModel, calculateThirdVertex, ModelPoint } from '../utils/coordinateSystem';
-import { CANVAS_CONFIG } from '../constants';
+import { getCentroid, distance, generateId, calculateThirdPoint } from '../utils/geometryUtils';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
-
-// Unified edge selection type
-type SelectedEdge =
-  | { type: 'triangle'; triangleId: string; edgeIndex: 0 | 1 | 2 }
-  | { type: 'standalone'; edgeId: string }
-  | null;
 
 interface GeometryCanvasProps {
   triangles: RenderedTriangle[];
@@ -19,17 +11,16 @@ interface GeometryCanvasProps {
   selectedTriangleId: string | null;
   onSelectTriangle: (id: string) => void;
   onEdgeSelect: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
-  onStandaloneEdgeSelect?: (edgeId: string) => void;
   onEdgeDoubleClick: (triangleId: string, edgeIndex: 0 | 1 | 2) => void;
   onDimensionChange?: (triangleId: string, edgeIndex: 0 | 1 | 2, newValue: number) => boolean;
-  onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, placeOnLeft: boolean) => void;
-  onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, placeOnLeft: boolean) => void;
+  onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => void;
+  onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
   onBackgroundClick?: () => void;
-  selectedEdge: SelectedEdge;
+  selectedEdge: { triangleId: string, edgeIndex: 0 | 1 | 2 } | null;
   occupiedEdges?: Set<string>;
   standaloneEdges?: StandaloneEdge[];
   onAddStandaloneEdge?: (p1: Point, p2: Point) => void;
-  onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, placeOnLeft: boolean) => void;
+  onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
   onDeleteTriangle?: (id: string) => void;
   onDeleteStandaloneEdge?: (id: string) => void;
   onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
@@ -39,40 +30,22 @@ interface GeometryCanvasProps {
   onRootPlacingCancel?: () => void;
 }
 
-// Source of the edge for triangle placement
-type EdgeSource =
-  | { kind: 'triangle'; tId: string; index: 0 | 1 | 2 }
-  | { kind: 'standalone'; edgeId: string };
-
 type InteractionState =
   | { type: 'IDLE' }
   | { type: 'PAN_READY'; startX: number; startY: number }
   | { type: 'PANNING'; lastX: number; lastY: number }
   | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
   | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
-  | { type: 'PHANTOM_PLACING'; source: EdgeSource; p1: Point; p2: Point; currentMouse: Point }
+  | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'DRAWING_EDGE'; startPoint: Point; currentMouse: Point }
+  | { type: 'STANDALONE_EDGE_PLACING'; edgeId: string; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'EXTENDING_EDGE'; fromEdgeId: string; fromPoint: Point; currentMouse: Point }
   | { type: 'ROOT_PLACING_ORIGIN'; sideA: number; sideB: number; sideC: number; currentMouse: Point }
   | { type: 'ROOT_PLACING_ANGLE'; sideA: number; sideB: number; sideC: number; origin: Point; currentMouse: Point };
 
-// Extract constants for cleaner code
-const { LONG_PRESS_DURATION, SNAP_THRESHOLD, ZOOM_SENSITIVITY, ZOOM_MIN, ZOOM_MAX, VIRTUAL_WIDTH, VIRTUAL_HEIGHT, WORLD_BOUNDS } = CANVAS_CONFIG;
-
-// Placing/drawing modes that should not be interrupted by other interactions
-const PLACING_MODES = [
-  'PHANTOM_PLACING',
-  'VERTEX_RESHAPING',
-  'DRAWING_EDGE',
-  'EXTENDING_EDGE',
-  'ROOT_PLACING_ORIGIN',
-  'ROOT_PLACING_ANGLE'
-] as const;
-
-const isPlacingMode = (interaction: InteractionState): boolean => {
-  return PLACING_MODES.includes(interaction.type as any);
-};
+// Long press duration in milliseconds
+const LONG_PRESS_DURATION = 600;
 
 const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   triangles,
@@ -80,7 +53,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   selectedTriangleId,
   onSelectTriangle,
   onEdgeSelect,
-  onStandaloneEdgeSelect,
   onEdgeDoubleClick,
   onDimensionChange,
   onAddAttachedTriangle,
@@ -116,29 +88,21 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const [editingEdgeDim, setEditingEdgeDim] = useState<{ edgeId: string, value: string, originalValue: number } | null>(null);
   const [editingInputPos, setEditingInputPos] = useState<{ x: number; y: number; angle: number; fontSize: number } | null>(null);
 
-  // Debug console state
-  const [debugLogs, setDebugLogs] = useState<string[]>([]);
-  const addLog = useCallback((msg: string) => {
-    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
-    setDebugLogs(prev => [...prev.slice(-19), `[${timestamp}] ${msg}`]);
+  // Initial viewport: -10, -10 to 40, 30 (width: 50, height: 40)
+  // CAD-like coordinate system: origin at bottom-left, positive X right, positive Y up
+  // But screen Y is inverted, so we use negative Y values for "up"
+  const worldBounds = { x: 0, y: -40, w: 50, h: 40 };
+
+  // Determine which side of the edge (p1->p2) the mouse point is on
+  // Returns true if the point is on the "flip" side (negative cross product)
+  const isFlipSide = useCallback((p1: Point, p2: Point, mouse: Point): boolean => {
+    // Cross product of (p2-p1) and (mouse-p1)
+    const cross = (p2.x - p1.x) * (mouse.y - p1.y) - (p2.y - p1.y) * (mouse.x - p1.x);
+    return cross < 0;
   }, []);
 
-  // Track interaction state changes
-  useEffect(() => {
-    addLog(`interaction changed -> ${interaction.type}`);
-  }, [interaction.type, addLog]);
-
-  // Viewport for coordinate transformations
-  const viewport = {
-    modelBounds: {
-      minX: WORLD_BOUNDS.x,
-      minY: WORLD_BOUNDS.y,
-      width: WORLD_BOUNDS.w,
-      height: WORLD_BOUNDS.h,
-    },
-    screenWidth: VIRTUAL_WIDTH,
-    screenHeight: VIRTUAL_HEIGHT,
-  };
+  // Snap threshold in world units
+  const SNAP_THRESHOLD = 0.5;
 
   // Get all snap points (triangle vertices and standalone edge endpoints)
   const getSnapPoints = useCallback((): Point[] => {
@@ -161,7 +125,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const findSnapPoint = useCallback((mouse: Point, excludePoints?: Point[]): Point | null => {
     const snapPoints = getSnapPoints();
     let nearest: Point | null = null;
-    let nearestDist: number = SNAP_THRESHOLD;
+    let nearestDist = SNAP_THRESHOLD;
 
     for (const p of snapPoints) {
       // Skip excluded points (e.g., the base edge endpoints when adding triangle)
@@ -184,69 +148,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const snapPoint = findSnapPoint(mouse, excludePoints);
     return snapPoint || mouse;
   }, [findSnapPoint]);
-
-  // Ref to hold the current interaction for global click handler
-  const interactionRef = useRef(interaction);
-  useEffect(() => {
-    interactionRef.current = interaction;
-  }, [interaction]);
-
-  // Global click handler for placing modes (workaround for Konva event issues)
-  useEffect(() => {
-    if (!isPlacingMode(interaction)) return;
-
-    const handleGlobalClick = () => {
-      const currentInteraction = interactionRef.current;
-      addLog(`[Global click] type=${currentInteraction.type}`);
-
-      if (currentInteraction.type === 'PHANTOM_PLACING') {
-        const { p1, p2, currentMouse, source } = currentInteraction;
-        const snappedMouse = applySnap(currentMouse, [p1, p2]);
-        const sideLeft = distance(p1, snappedMouse);
-        const sideRight = distance(p2, snappedMouse);
-        const placeOnLeft = shouldPlaceOnLeft(p1, p2, snappedMouse);
-        addLog(`[Global] L=${sideLeft.toFixed(2)} R=${sideRight.toFixed(2)} source=${source.kind}`);
-
-        if (sideLeft > 0 && sideRight > 0) {
-          if (source.kind === 'triangle') {
-            const isOccupied = occupiedEdges?.has(`${source.tId}-${source.index}`) || false;
-            if (isOccupied) {
-              setInteraction({ type: 'IDLE' });
-              return;
-            }
-            if (onAddAttachedTriangle) {
-              onAddAttachedTriangle(source.tId, source.index, sideLeft, sideRight, placeOnLeft);
-            }
-          } else if (source.kind === 'standalone') {
-            if (onAddTriangleFromEdge) {
-              onAddTriangleFromEdge(source.edgeId, sideLeft, sideRight, placeOnLeft);
-            }
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-      } else if (currentInteraction.type === 'DRAWING_EDGE') {
-        const { startPoint, currentMouse } = currentInteraction;
-        if (onAddStandaloneEdge) {
-          const snappedMouse = applySnap(currentMouse, [startPoint]);
-          const len = distance(startPoint, snappedMouse);
-          if (len > 0.1) {
-            onAddStandaloneEdge(startPoint, snappedMouse);
-          }
-        }
-        setInteraction({ type: 'IDLE' });
-      }
-    };
-
-    // Use setTimeout to avoid capturing the double-click that started the mode
-    const timer = setTimeout(() => {
-      window.addEventListener('click', handleGlobalClick);
-    }, 100);
-
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('click', handleGlobalClick);
-    };
-  }, [interaction.type, addLog, applySnap, onAddAttachedTriangle, onAddStandaloneEdge, onAddTriangleFromEdge, occupiedEdges]);
 
   // Long press handlers
   const startLongPress = useCallback((type: 'triangle' | 'edge', id: string) => {
@@ -318,16 +219,25 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     }
   }, [rootPlacingMode]);
 
-  // Convert model coordinates to stage (screen) coordinates
-  // Uses the coordinate system framework with Y-axis flip
-  const worldToStage = useCallback((modelX: number, modelY: number): { x: number; y: number } => {
-    return modelToScreen({ x: modelX, y: modelY }, viewport);
-  }, [viewport]);
+  // Convert world coordinates to stage coordinates
+  const worldToStage = useCallback((worldX: number, worldY: number): { x: number; y: number } => {
+    const normalizedX = (worldX - worldBounds.x) / worldBounds.w;
+    const normalizedY = (worldY - worldBounds.y) / worldBounds.h;
+    return {
+      x: normalizedX * 1000, // Use a fixed virtual canvas size
+      y: normalizedY * 800
+    };
+  }, []);
 
-  // Convert stage (screen) coordinates to model coordinates
-  const stageToWorld = useCallback((screenX: number, screenY: number): { x: number; y: number } => {
-    return screenToModel({ x: screenX, y: screenY }, viewport);
-  }, [viewport]);
+  // Convert stage coordinates to world coordinates
+  const stageToWorld = useCallback((stageX: number, stageY: number): { x: number; y: number } => {
+    const normalizedX = stageX / 1000;
+    const normalizedY = stageY / 800;
+    return {
+      x: worldBounds.x + normalizedX * worldBounds.w,
+      y: worldBounds.y + normalizedY * worldBounds.h
+    };
+  }, []);
 
   // Get world point from stage event
   const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent>): Point => {
@@ -350,27 +260,26 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         setStageSize({ width: rect.width, height: rect.height });
-
+        
         // Calculate initial scale to fit world bounds
-        const scaleX = rect.width / VIRTUAL_WIDTH;
-        const scaleY = rect.height / VIRTUAL_HEIGHT;
+        const scaleX = rect.width / 1000;
+        const scaleY = rect.height / 800;
         const initialScale = Math.min(scaleX, scaleY) * 0.9;
         setStageScale(initialScale);
-
+        
         // Center the view
-        const centerX = rect.width / 2 - (VIRTUAL_WIDTH * initialScale) / 2;
-        const centerY = rect.height / 2 - (VIRTUAL_HEIGHT * initialScale) / 2;
+        const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+        const centerY = rect.height / 2 - (800 * initialScale) / 2;
         setStagePosition({ x: centerX, y: centerY });
       }
     };
-
+    
     updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    addLog(`[Stage mouseDown] type=${interaction.type}`);
     if (e.evt.button === 0 && !editingDim) {
       // If in root placing origin mode, set the origin
       if (interaction.type === 'ROOT_PLACING_ORIGIN') {
@@ -401,38 +310,23 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
       // If in phantom placing mode, confirm the triangle on click
       if (interaction.type === 'PHANTOM_PLACING') {
-        addLog('[PHANTOM confirm] processing...');
-        const { p1, p2, currentMouse, source } = interaction;
-        const snappedMouse = applySnap(currentMouse, [p1, p2]);
-        const sideLeft = distance(p1, snappedMouse);
-        const sideRight = distance(p2, snappedMouse);
-        const placeOnLeft = shouldPlaceOnLeft(p1, p2, snappedMouse);
-        addLog(`[PHANTOM confirm] L=${sideLeft.toFixed(2)} R=${sideRight.toFixed(2)} source=${source.kind}`);
-
-        if (sideLeft > 0 && sideRight > 0) {
-          if (source.kind === 'triangle') {
-            const isOccupied = occupiedEdges?.has(`${source.tId}-${source.index}`) || false;
-            addLog(`[PHANTOM confirm] occupied=${isOccupied}`);
-            if (isOccupied) {
-              setInteraction({ type: 'IDLE' });
-              return;
-            }
-            if (onAddAttachedTriangle) {
-              addLog('[PHANTOM confirm] calling onAddAttachedTriangle');
-              onAddAttachedTriangle(source.tId, source.index, sideLeft, sideRight, placeOnLeft);
-            } else {
-              addLog('[PHANTOM confirm] NO CALLBACK (triangle)');
-            }
-          } else if (source.kind === 'standalone') {
-            if (onAddTriangleFromEdge) {
-              addLog('[PHANTOM confirm] calling onAddTriangleFromEdge');
-              onAddTriangleFromEdge(source.edgeId, sideLeft, sideRight, placeOnLeft);
-            } else {
-              addLog('[PHANTOM confirm] NO CALLBACK (standalone)');
-            }
+        if (onAddAttachedTriangle) {
+          const { p1, p2, currentMouse, tId, index } = interaction;
+          // Check if this edge is already occupied
+          const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+          if (isOccupied) {
+            // Edge already has a child triangle - don't add another
+            setInteraction({ type: 'IDLE' });
+            return;
           }
-        } else {
-          addLog('[PHANTOM confirm] SKIPPED - invalid sides');
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+          }
         }
         setInteraction({ type: 'IDLE' });
         return;
@@ -445,9 +339,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           const snappedMouse = applySnap(currentMouse, [p1, p2]);
           const sideLeft = distance(p1, snappedMouse);
           const sideRight = distance(p2, snappedMouse);
-          const placeOnLeft = shouldPlaceOnLeft(p1, p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
           if (sideLeft > 0 && sideRight > 0) {
-            onVertexReshape(tId, sideLeft, sideRight, placeOnLeft);
+            onVertexReshape(tId, sideLeft, sideRight, flip);
           }
         }
         setInteraction({ type: 'IDLE' });
@@ -462,6 +356,22 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           const len = distance(startPoint, snappedMouse);
           if (len > 0.1) {
             onAddStandaloneEdge(startPoint, snappedMouse);
+          }
+        }
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      // If placing triangle from standalone edge, confirm on click
+      if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+        if (onAddTriangleFromEdge) {
+          const { edgeId, p1, p2, currentMouse } = interaction;
+          // Apply snap (exclude base edge points)
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
           }
         }
         setInteraction({ type: 'IDLE' });
@@ -490,19 +400,15 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const handleBackgroundDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Only handle if click target is the background rect itself
     const targetName = e.target.name();
-    addLog(`[Background dblClick] target=${targetName}`);
     if (targetName !== 'background-rect') return;
 
     // Allow adding edges anytime
     const startPoint = getWorldPoint(e);
-    addLog(`[Background dblClick] -> DRAWING_EDGE`);
     setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
   };
 
   const handleEdgeMouseDown = (e: Konva.KonvaEventObject<MouseEvent>, tId: string, index: 0 | 1 | 2, p1: Point, p2: Point) => {
     e.evt.stopPropagation();
-    // Don't interrupt placing/drawing modes
-    if (isPlacingMode(interaction)) return;
     if (e.evt.button === 0 && !editingDim) {
       setInteraction({
         type: 'EDGE_READY',
@@ -542,6 +448,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     } else if (interaction.type === 'DRAWING_EDGE') {
       const currentMouse = getWorldPoint(e);
       setInteraction({ ...interaction, currentMouse });
+    } else if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+      const currentMouse = getWorldPoint(e);
+      setInteraction({ ...interaction, currentMouse });
     } else if (interaction.type === 'EXTENDING_EDGE') {
       const currentMouse = getWorldPoint(e);
       setInteraction({ ...interaction, currentMouse });
@@ -561,6 +470,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         interaction.type === 'PHANTOM_PLACING' ||
         interaction.type === 'VERTEX_RESHAPING' ||
         interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
         interaction.type === 'EXTENDING_EDGE') {
       return;
     }
@@ -592,9 +502,12 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       y: (pointer.y - stage.y()) / oldScale,
     };
 
+    const zoomSensitivity = 0.002;
     const delta = e.evt.deltaY;
-    const scaleBy = 1 - delta * ZOOM_SENSITIVITY;
-    const newScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, oldScale * scaleBy));
+    const scaleBy = 1 - delta * zoomSensitivity;
+    const newScale = Math.max(0.1, Math.min(5, oldScale * scaleBy));
+
+    // Limit zoom (already applied above)
 
     const newPos = {
       x: pointer.x - mousePointTo.x * newScale,
@@ -607,7 +520,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   const handleZoomBtn = (direction: 'in' | 'out') => {
     if (!stageRef.current) return;
-
+    
     const stage = stageRef.current;
     const oldScale = stage.scaleX();
     const center = {
@@ -623,7 +536,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const scaleBy = direction === 'in' ? 1.25 : 0.8;
     const newScale = oldScale * scaleBy;
 
-    if (newScale < ZOOM_MIN || newScale > ZOOM_MAX) return;
+    if (newScale < 0.1 || newScale > 5) return;
 
     const newPos = {
       x: center.x - mousePointTo.x * newScale,
@@ -637,13 +550,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const handleFitView = () => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const scaleX = rect.width / VIRTUAL_WIDTH;
-    const scaleY = rect.height / VIRTUAL_HEIGHT;
+    const scaleX = rect.width / 1000;
+    const scaleY = rect.height / 800;
     const initialScale = Math.min(scaleX, scaleY) * 0.9;
     setStageScale(initialScale);
-
-    const centerX = rect.width / 2 - (VIRTUAL_WIDTH * initialScale) / 2;
-    const centerY = rect.height / 2 - (VIRTUAL_HEIGHT * initialScale) / 2;
+    
+    const centerX = rect.width / 2 - (1000 * initialScale) / 2;
+    const centerY = rect.height / 2 - (800 * initialScale) / 2;
     setStagePosition({ x: centerX, y: centerY });
   };
 
@@ -721,14 +634,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   // Render Grid with background rect for double-click handling
   const renderGrid = () => {
-    const { minX, minY, width, height } = viewport.modelBounds;
     const step = 1;
-    const startX = Math.floor(minX / step) * step;
-    const startY = Math.floor(minY / step) * step;
-    const endX = minX + width;
-    const endY = minY + height;
+    const startX = Math.floor(worldBounds.x / step) * step;
+    const startY = Math.floor(worldBounds.y / step) * step;
+    const endX = worldBounds.x + worldBounds.w;
+    const endY = worldBounds.y + worldBounds.h;
 
-    const topLeft = worldToStage(minX, minY);
+    const topLeft = worldToStage(worldBounds.x, worldBounds.y);
     const bottomRight = worldToStage(endX, endY);
 
     const elements = [];
@@ -748,7 +660,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
 
     for (let x = startX; x <= endX; x += step) {
-      const sp1 = worldToStage(x, minY);
+      const sp1 = worldToStage(x, worldBounds.y);
       const sp2 = worldToStage(x, endY);
       const isMajor = Math.abs(x % (step * 5)) < 0.001 || Math.abs(x) < 0.001;
       elements.push(
@@ -761,7 +673,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       );
     }
     for (let y = startY; y <= endY; y += step) {
-      const sp1 = worldToStage(minX, y);
+      const sp1 = worldToStage(worldBounds.x, y);
       const sp2 = worldToStage(endX, y);
       const isMajor = Math.abs(y % (step * 5)) < 0.001 || Math.abs(y) < 0.001;
       elements.push(
@@ -783,7 +695,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     pEnd: Point,
     index: 0 | 1 | 2
   ) => {
-    const isSelectedEdge = selectedEdge?.type === 'triangle' && selectedEdge.triangleId === t.id && selectedEdge.edgeIndex === index;
+    const isSelectedEdge = selectedEdge?.triangleId === t.id && selectedEdge?.edgeIndex === index;
     const isOccupied = occupiedEdges?.has(`${t.id}-${index}`) || false;
     const rawLen = distance(pStart, pEnd);
     const len = rawLen.toFixed(2);
@@ -798,13 +710,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const edgeLabel = t.edgeLabels ? t.edgeLabels[index] : '';
     const isEditing = editingDim?.tId === t.id && editingDim?.index === index;
 
-    // Calculate angle for label rotation using utility function
+    // Calculate angle for label rotation
     const dx = pEnd.x - pStart.x;
     const dy = pEnd.y - pStart.y;
-    const angle = calculateNormalizedAngle(dx, dy);
+    let angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    if (angle > 90 || angle < -90) {
+      angle += 180;
+    }
 
     // Calculate font size based on world-to-screen scale
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
 
     // Calculate text for label
@@ -821,34 +736,30 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           <Line
             points={[sp1.x, sp1.y, sp2.x, sp2.y]}
             stroke="transparent"
-            strokeWidth={Math.max(20, 30 / (stageRef.current?.scaleX() || 1))}
-            lineCap="round"
+            strokeWidth={20}
             onClick={(e) => {
-              if (isPlacingMode(interaction)) return;
               e.evt.stopPropagation();
               e.cancelBubble = true;
+              // Allow edge selection even if occupied (for highlight)
               onEdgeSelect(t.id, index);
             }}
             onMouseDown={(e) => {
-              addLog(`[Edge mouseDown] type=${interaction.type} placing=${isPlacingMode(interaction)}`);
-              if (isPlacingMode(interaction)) {
-                addLog('[Edge mouseDown] placing mode - bubbling to Stage');
-                return;
-              }
-              e.evt.stopPropagation();
-              e.cancelBubble = true;
-              handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
-            }}
-            onDblClick={(e) => {
-              addLog(`[Edge dblClick] edge=${index} occupied=${isOccupied}`);
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
+                handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
+              }
+            }}
+            onDblClick={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                // Enter phantom placing mode
                 const currentMouse = getWorldPoint(e);
-                addLog(`[Edge dblClick] -> PHANTOM_PLACING (triangle)`);
                 setInteraction({
                   type: 'PHANTOM_PLACING',
-                  source: { kind: 'triangle', tId: t.id, index },
+                  tId: t.id,
+                  index,
                   p1: pStart,
                   p2: pEnd,
                   currentMouse
@@ -914,7 +825,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         stroke={isLongPressing ? "#ef4444" : "#64748b"}
         strokeWidth={isSelected || isLongPressing ? 2 : 1}
         onMouseDown={(e) => {
-          if (isPlacingMode(interaction)) return;
           if (e.evt.button === 0) {
             startLongPress('triangle', t.id);
           }
@@ -927,7 +837,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         }}
         onClick={() => {
           cancelLongPress();
-          if (isPlacingMode(interaction)) return;
           onSelectTriangle(t.id);
         }}
       />
@@ -937,7 +846,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   // Render a vertex marker (for extending edges from triangle vertices)
   const renderVertexMarker = (point: Point, triangleId: string) => {
     const sp = worldToStage(point.x, point.y);
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const radius = Math.max(4, 0.4 * uiScale);
 
     return (
@@ -970,7 +879,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const labelPos = worldToStage(centroid.x, centroid.y);
 
     // Calculate font size based on world-to-screen scale
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(10, 1.2 * uiScale);
 
     return (
@@ -1027,26 +936,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const renderSelectedEdgeHighlight = () => {
     if (!selectedEdge) return null;
 
+    const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
+    if (!t) return null;
+
     let p1: Point, p2: Point;
-
-    if (selectedEdge.type === 'triangle') {
-      const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
-      if (!t) return null;
-
-      if (selectedEdge.edgeIndex === 0) {
-        p1 = t.p1; p2 = t.p2;
-      } else if (selectedEdge.edgeIndex === 1) {
-        p1 = t.p2; p2 = t.p3;
-      } else {
-        p1 = t.p3; p2 = t.p1;
-      }
-    } else if (selectedEdge.type === 'standalone') {
-      const edge = standaloneEdges.find(e => e.id === selectedEdge.edgeId);
-      if (!edge) return null;
-      p1 = edge.p1;
-      p2 = edge.p2;
+    if (selectedEdge.edgeIndex === 0) {
+      p1 = t.p1; p2 = t.p2;
+    } else if (selectedEdge.edgeIndex === 1) {
+      p1 = t.p2; p2 = t.p3;
     } else {
-      return null;
+      p1 = t.p3; p2 = t.p1;
     }
 
     const sp1 = worldToStage(p1.x, p1.y);
@@ -1080,7 +979,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const midX = (sp1.x + sp2.x) / 2;
     const midY = (sp1.y + sp2.y) / 2;
 
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
     const lenText = edge.length.toFixed(2);
     const charWidth = fontSize * 0.6;
@@ -1088,28 +987,15 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const endpointRadius = Math.max(4, fontSize * 0.4);
 
     const isLongPressing = longPressTarget?.type === 'edge' && longPressTarget?.id === edge.id;
-    const isSelected = selectedEdge?.type === 'standalone' && selectedEdge.edgeId === edge.id;
 
     return (
       <Group key={`standalone-${edge.id}`}>
-        {/* Hit area for click (select), double-click (create triangle), and long press (delete) */}
+        {/* Hit area for double-click on edge body (to create triangle) and long press to delete */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
           stroke="transparent"
-          strokeWidth={Math.max(20, 30 / (stageRef.current?.scaleX() || 1))}
-          lineCap="round"
-          onClick={(e) => {
-            if (isPlacingMode(interaction)) return;
-            e.evt.stopPropagation();
-            e.cancelBubble = true;
-            if (onStandaloneEdgeSelect) {
-              onStandaloneEdgeSelect(edge.id);
-            }
-          }}
+          strokeWidth={20}
           onMouseDown={(e) => {
-            if (isPlacingMode(interaction)) return; // Let event bubble to Stage
-            e.evt.stopPropagation();
-            e.cancelBubble = true;
             if (e.evt.button === 0) {
               startLongPress('edge', edge.id);
             }
@@ -1123,40 +1009,21 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           onDblClick={(e) => {
             cancelLongPress();
             e.evt.stopPropagation();
-            addLog(`[StandaloneEdge dblClick] -> PHANTOM_PLACING (standalone)`);
             // Enter triangle placing mode from this edge
             setInteraction({
-              type: 'PHANTOM_PLACING',
-              source: { kind: 'standalone', edgeId: edge.id },
+              type: 'STANDALONE_EDGE_PLACING',
+              edgeId: edge.id,
               p1: edge.p1,
               p2: edge.p2,
               currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
             });
           }}
         />
-        {/* Selection highlight - render before visible edge */}
-        {isSelected && (
-          <>
-            <Line
-              points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-              stroke="#fde047"
-              strokeWidth={12}
-              lineCap="round"
-              opacity={0.6}
-            />
-            <Line
-              points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-              stroke="#facc15"
-              strokeWidth={6}
-              lineCap="round"
-            />
-          </>
-        )}
         {/* Visible edge */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
           stroke={isLongPressing ? "#ef4444" : "#3b82f6"}
-          strokeWidth={isLongPressing ? 3 : (isSelected ? 3 : 2)}
+          strokeWidth={isLongPressing ? 3 : 2}
           opacity={isLongPressing ? (0.5 + longPressTarget!.progress * 0.5) : 1}
         />
         {/* Endpoint 1 - double-click to extend */}
@@ -1241,7 +1108,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const sp2 = worldToStage(snappedMouse.x, snappedMouse.y);
     const len = distance(startPoint, snappedMouse).toFixed(2);
 
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
     const charWidth = fontSize * 0.6;
     const textWidth = len.length * charWidth;
@@ -1282,9 +1149,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
-  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, VERTEX_RESHAPING)
+  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, VERTEX_RESHAPING, STANDALONE_EDGE_PLACING)
   const renderDragGhost = () => {
-    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING') return null;
+    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING' && interaction.type !== 'STANDALONE_EDGE_PLACING') return null;
     const { p1, p2, currentMouse } = interaction;
 
     // Apply snap for visual feedback (exclude base edge points)
@@ -1299,7 +1166,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const sR = distance(p2, snappedMouse).toFixed(2);
 
     // Calculate font size based on world-to-screen scale
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
     const snapRadius = Math.max(6, fontSize * 0.5);
 
@@ -1375,7 +1242,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     if (interaction.type !== 'ROOT_PLACING_ORIGIN' && interaction.type !== 'ROOT_PLACING_ANGLE') return null;
 
     const { sideA, sideB, sideC, currentMouse } = interaction;
-    const uiScale = (viewport.modelBounds.width / 50) * (stageRef.current?.scaleX() || 1);
+    const uiScale = (worldBounds.w / 50) * (stageRef.current?.scaleX() || 1);
     const fontSize = Math.max(8, 0.8 * uiScale);
     const snapRadius = Math.max(6, fontSize * 0.5);
 
@@ -1437,14 +1304,14 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         y: origin.y + sideA * Math.sin(angle)
       };
 
-      // Calculate third vertex on LEFT side (same as recalculateGeometry for root triangles)
-      const p3Result = calculateThirdVertex(p1, p2, sideB, sideC, true);
+      // Use the SAME function as recalculateGeometry
+      // recalculateGeometry calls: calculateThirdPoint(p1, p2, sb, sc, !def.flip)
+      // def.flip defaults to false/undefined, so !def.flip = true
+      const p3 = calculateThirdPoint(p1, p2, sideB, sideC, true);
 
-      if (!p3Result) {
+      if (!p3) {
         return null;
       }
-
-      const p3: Point = { id: 'p3', x: p3Result.x, y: p3Result.y };
 
       const sp1 = worldToStage(p1.x, p1.y);
       const sp2 = worldToStage(p2.x, p2.y);
@@ -1562,11 +1429,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           {/* Render standalone edges */}
           {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
           {/* Render all triangle fills first (bottom layer) */}
-          {triangles.map((t) => renderTriangleFill(t))}
+          {triangles.map((t) => renderTriangleFill(t, false))}
           {/* Render selected edge highlight (above fills, below labels) */}
           {renderSelectedEdgeHighlight()}
           {/* Render all labels on top (so they're clickable) */}
-          {triangles.map((t) => renderTriangleLabels(t))}
+          {triangles.map((t) => renderTriangleLabels(t, false))}
           {renderEdgeDrawingGhost()}
           {renderDragGhost()}
           {renderRootPlacingPreview()}
@@ -1595,32 +1462,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         </button>
       </div>
 
-      <div className="absolute bottom-32 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
+      <div className="absolute bottom-4 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
         <p>• <span className="text-blue-600 font-bold">辺ダブルクリック</span>: 三角形を追加</p>
         <p>• <span className="text-blue-600 font-bold">寸法クリック</span>: 数値を編集</p>
         <p>• <span className="text-amber-600 font-bold">番号ダブルクリック</span>: 頂点を移動</p>
         <p>• <span className="text-slate-600 font-bold">長押し</span>: 削除</p>
         <p>• スクロール: ズーム / ドラッグ: パン</p>
-      </div>
-
-      {/* Debug Console */}
-      <div className="absolute bottom-0 left-0 right-0 h-28 bg-slate-900 text-green-400 font-mono text-xs overflow-y-auto border-t border-slate-700">
-        <div className="sticky top-0 bg-slate-800 px-2 py-1 flex justify-between items-center border-b border-slate-700">
-          <span className="text-slate-400">Debug Console - interaction: <span className="text-yellow-400">{interaction.type}</span></span>
-          <button
-            onClick={() => setDebugLogs([])}
-            className="text-slate-500 hover:text-white px-2"
-          >
-            Clear
-          </button>
-        </div>
-        <div className="p-2 space-y-0.5">
-          {debugLogs.map((log, i) => (
-            <div key={i} className="whitespace-nowrap">{log}</div>
-          ))}
-          {debugLogs.length === 0 && <div className="text-slate-500">No logs yet...</div>}
-        </div>
       </div>
 
       {/* HTML Input overlay for editing triangle dimensions */}

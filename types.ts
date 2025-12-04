@@ -18,57 +18,29 @@ export interface RenderedTriangle {
   edgeLabels: [string, string, string]; // Labels for p1-p2, p2-p3, p3-p1
 }
 
-/**
- * Triangle Definition - The source of truth for triangle geometry.
- *
- * This uses a single interface with optional fields rather than a discriminated union
- * to avoid excessive type narrowing complexity throughout the codebase.
- *
- * Convention:
- * - If isRoot=true: sideA, sideB, sideC are required (defines a standalone triangle)
- * - If isRoot=false: attachedToTriangleId, attachedEdgeIndex, sideLeft, sideRight, flip are required
- */
+// The source of truth
 export interface TriangleDef {
   id: string;
   name: string;
   color: string;
+
+  // For the very first triangle (Root)
   isRoot: boolean;
+  sideA?: number; // Base
+  sideB?: number; // Left
+  sideC?: number; // Right
 
-  // Root triangle properties
-  sideA?: number; // Base edge length
-  sideB?: number; // Left edge length (p1 to p3)
-  sideC?: number; // Right edge length (p2 to p3)
-  originP1?: Point; // Optional origin for root triangle
-  originP2?: Point;
+  // Origin offset for root triangle (if created from standalone edge)
+  originP1?: Point; // Start point of base edge
+  originP2?: Point; // End point of base edge
 
-  // Attached triangle properties
+  // For attached triangles
   attachedToTriangleId?: string;
   attachedEdgeIndex?: 0 | 1 | 2; // 0=p1-p2, 1=p2-p3, 2=p3-p1
-  sideLeft?: number;  // Distance from edge start to new vertex
-  sideRight?: number; // Distance from edge end to new vertex
-  flip?: boolean;     // If true, place vertex on right side of edge; if false, left side
+  sideLeft?: number;  // Distance from edge start
+  sideRight?: number; // Distance from edge end
+  flip?: boolean;     // Flip across the base edge
 }
-
-// Type guard for root triangle
-export const isRootTriangle = (def: TriangleDef): def is TriangleDef & { isRoot: true; sideA: number; sideB: number; sideC: number } => {
-  return def.isRoot === true && def.sideA !== undefined && def.sideB !== undefined && def.sideC !== undefined;
-};
-
-// Type guard for attached triangle
-export const isAttachedTriangle = (def: TriangleDef): def is TriangleDef & {
-  isRoot: false;
-  attachedToTriangleId: string;
-  attachedEdgeIndex: 0 | 1 | 2;
-  sideLeft: number;
-  sideRight: number;
-  flip: boolean;
-} => {
-  return def.isRoot === false &&
-    def.attachedToTriangleId !== undefined &&
-    def.attachedEdgeIndex !== undefined &&
-    def.sideLeft !== undefined &&
-    def.sideRight !== undefined;
-};
 
 export interface GeometryData {
   points: Point[];
