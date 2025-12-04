@@ -3,7 +3,7 @@ import Konva from 'konva';
 
 // Gesture detection constants
 export const GESTURE_CONSTANTS = {
-  LONG_PRESS_DURATION: 600,   // ms
+  LONG_PRESS_DURATION: 300,   // ms
   DOUBLE_TAP_INTERVAL: 300,   // ms
   DOUBLE_TAP_DISTANCE: 30,    // px
   MOVE_THRESHOLD: 5,          // px to cancel long press / start drag

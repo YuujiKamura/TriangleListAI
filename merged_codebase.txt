@@ -1,5 +1,5 @@
 # TriangleListAI - Merged Codebase for AI Analysis
-# Generated: Thu, Dec  4, 2025  5:51:03 PM
+# Generated: Thu Dec  4 19:45:34     2025
 # This file is for AI Studio import. Original files are preserved.
 
 //===============================================================================
@@ -709,6 +709,8 @@ import { DeleteConfirmationDialog } from './ui/DeleteConfirmationDialog';
 import { DebugConsole } from './ui/DebugConsole';
 import { EdgeActionButton } from './ui/EdgeActionButton';
 import { TriangleActionButton } from './ui/TriangleActionButton';
+import { StandaloneEdgeActionButton } from './ui/StandaloneEdgeActionButton';
+import { EntityDeleteFAB } from './ui/EntityDeleteFAB';
 import { usePointer, GESTURE_CONSTANTS, PointerInfo } from '../hooks/usePointer';
 import { clickHandlers, interactiveHandlers, ClickTapEvent } from '../hooks/useKonvaHandlers';
 
@@ -731,6 +733,7 @@ interface GeometryCanvasProps {
   onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
   onDeleteTriangle?: (id: string) => void;
   onDeleteStandaloneEdge?: (id: string) => void;
+  onDeleteMultiple?: (triangleIds: string[], edgeIds: string[]) => void;
   onUpdateStandaloneEdgeLength?: (id: string, newLength: number) => void;
   onMoveTriangles?: (ids: string[], dx: number, dy: number) => void;
   onMoveStandaloneEdges?: (ids: string[], dx: number, dy: number) => void;
@@ -738,6 +741,12 @@ interface GeometryCanvasProps {
   rootPlacingMode?: { sideA: number; sideB: number; sideC: number } | null;
   onRootPlacingComplete?: (origin: Point, angle: number) => void;
   onRootPlacingCancel?: () => void;
+  // Edge editing mode (pencil button) - for edge creation and reshaping
+  edgeEditMode?: boolean;
+  onEdgeEditModeChange?: (active: boolean) => void;
+  // Triangle editing mode (triangle button) - for triangle creation and reshaping
+  triangleEditMode?: boolean;
+  onTriangleEditModeChange?: (active: boolean) => void;
 }
 
 type InteractionState =
@@ -765,7 +774,7 @@ type ContextMenuState = {
 } | null;
 
 // Long press duration in milliseconds
-const LONG_PRESS_DURATION = 600;
+const LONG_PRESS_DURATION = 300;
 
 const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   triangles,
@@ -786,17 +795,26 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   onAddTriangleFromEdge,
   onDeleteTriangle,
   onDeleteStandaloneEdge,
+  onDeleteMultiple,
   onUpdateStandaloneEdgeLength,
   onMoveTriangles,
   onMoveStandaloneEdges,
   rootPlacingMode,
   onRootPlacingComplete,
-  onRootPlacingCancel
+  onRootPlacingCancel,
+  edgeEditMode = false,
+  onEdgeEditModeChange,
+  triangleEditMode = false,
+  onTriangleEditModeChange
 }) => {
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const longPressStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  // Track if panning just ended to prevent accidental edge generation
+  const panningJustEndedRef = useRef<boolean>(false);
+  // Track if pointer is currently pressed down
+  const isPointerDownRef = useRef<boolean>(false);
 
   // Multi-selection state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -912,8 +930,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     longPressStartPosRef.current = { x: screenX, y: screenY };
 
     longPressTimerRef.current = window.setTimeout(() => {
-      // Start selection rectangle
-      setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+      // Only start SELECT_RECT if pointer is still pressed down (click and hold)
+      if (isPointerDownRef.current) {
+        setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+      }
       longPressTimerRef.current = null;
     }, LONG_PRESS_DURATION);
   }, []);
@@ -966,12 +986,19 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           if ((interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE') && onRootPlacingCancel) {
             onRootPlacingCancel();
           }
+          // Exit edit modes on ESC
+          if (edgeEditMode && onEdgeEditModeChange) {
+            onEdgeEditModeChange(false);
+          }
+          if (triangleEditMode && onTriangleEditModeChange) {
+            onTriangleEditModeChange(false);
+          }
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [interaction.type, onRootPlacingCancel]);
+  }, [interaction.type, onRootPlacingCancel, edgeEditMode, onEdgeEditModeChange, triangleEditMode, onTriangleEditModeChange]);
 
   // Enter root placing mode when rootPlacingMode is set
   useEffect(() => {
@@ -990,6 +1017,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
     }
   }, [rootPlacingMode]);
+
+  // Cancel creation modes when edit modes are turned off
+  useEffect(() => {
+    // Cancel edge-related modes when edge edit mode is turned off
+    if (!edgeEditMode) {
+      const edgeModes = ['DRAWING_EDGE', 'EXTENDING_EDGE'];
+      if (edgeModes.includes(interaction.type)) {
+        setInteraction({ type: 'IDLE' });
+      }
+    }
+    // Cancel triangle-related modes when triangle edit mode is turned off
+    if (!triangleEditMode) {
+      const triangleModes = ['PHANTOM_PLACING', 'VERTEX_RESHAPING', 'STANDALONE_EDGE_PLACING'];
+      if (triangleModes.includes(interaction.type)) {
+        setInteraction({ type: 'IDLE' });
+      }
+    }
+  }, [edgeEditMode, triangleEditMode, interaction.type]);
 
   // Convert world coordinates to stage coordinates
   const worldToStage = useCallback((worldX: number, worldY: number): { x: number; y: number } => {
@@ -1147,16 +1192,23 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     hasInitializedView.current = true;
   }, [triangles, standaloneEdges, getEntitiesBounds, worldToStage]);
 
-  // Double click on background to start drawing an edge (legacy - for GridBackground)
+  // Single click on background to start drawing an edge (legacy - for GridBackground)
   // This is called from the background Rect, not Stage, to avoid intercepting other element events
-  const handleBackgroundDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+  const handleBackgroundClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Only handle if click target is the background rect itself
     const targetName = e.target.name();
     if (targetName !== 'background-rect') return;
 
-    // Allow adding edges anytime
-    const startPoint = getWorldPoint(e);
-    setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+    // パンニング操作が終了した直後はエッジ生成を開始しない
+    if (panningJustEndedRef.current) {
+      return;
+    }
+
+    // Only start edge drawing in edge edit mode
+    if (edgeEditMode) {
+      const startPoint = getWorldPoint(e);
+      setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+    }
   };
 
   // Edge pointer down handler - works with both mouse and touch via pointer events
@@ -1191,6 +1243,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   }, []);
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
+    // In edit modes, disable zoom operations
+    if (edgeEditMode || triangleEditMode) {
+      e.evt.preventDefault();
+      e.evt.stopPropagation();
+      return;
+    }
+
     e.evt.preventDefault();
     e.evt.stopPropagation();
 
@@ -1246,11 +1305,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     isInCreationMode,
 
     onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTap?: boolean) => {
+      // Mark pointer as pressed down
+      isPointerDownRef.current = true;
+      
       const targetName = target.name();
       addLog(`PointerDown: type=${pointer.pointerType}, target=${targetName}, doubleTap=${isDoubleTap}`);
 
-      // Creation mode confirmation: ONLY on double-tap
-      // Single tap in creation mode does nothing (ghost follows pointer movement)
+      // Creation mode confirmation: on single tap (double tap is no longer used)
       const inCreationMode = interaction.type === 'PHANTOM_PLACING' ||
         interaction.type === 'VERTEX_RESHAPING' ||
         interaction.type === 'DRAWING_EDGE' ||
@@ -1259,12 +1320,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         interaction.type === 'ROOT_PLACING_ORIGIN' ||
         interaction.type === 'ROOT_PLACING_ANGLE';
 
-      // In creation mode: require double-tap to confirm, single-tap does nothing
-      if (inCreationMode && !isDoubleTap) {
-        // Single tap in creation mode - just update position (already done by onPointerMove)
-        // Don't confirm, don't cancel
-        return;
-      }
+      // In creation mode: single tap confirms (double tap check removed)
+      // Note: isDoubleTap parameter is kept for compatibility but not used
 
       // If in a creation mode, handle confirmation on next click
       if (interaction.type === 'MOVING_SELECTION') {
@@ -1328,6 +1385,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
       // Handle PHANTOM_PLACING confirmation
       if (interaction.type === 'PHANTOM_PLACING') {
+        // Only allow confirmation in triangle edit mode
+        if (!triangleEditMode) {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
         if (onAddAttachedTriangle) {
           const { p1, p2, currentMouse, tId, index } = interaction;
           const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
@@ -1342,11 +1404,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }
         }
         setInteraction({ type: 'IDLE' });
+        // Don't exit edge draw mode - keep it active
         return;
       }
 
       // Handle VERTEX_RESHAPING confirmation
       if (interaction.type === 'VERTEX_RESHAPING') {
+        // Only allow confirmation in triangle edit mode
+        if (!triangleEditMode) {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
         if (onVertexReshape) {
           const { p1, p2, currentMouse, tId } = interaction;
           const snappedMouse = applySnap(currentMouse, [p1, p2]);
@@ -1358,11 +1426,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }
         }
         setInteraction({ type: 'IDLE' });
+        // Don't exit edge draw mode - keep it active
         return;
       }
 
       // Handle DRAWING_EDGE confirmation
       if (interaction.type === 'DRAWING_EDGE') {
+        // Only allow confirmation in edge edit mode
+        if (!edgeEditMode) {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
         if (onAddStandaloneEdge) {
           const { startPoint, currentMouse } = interaction;
           const snappedMouse = applySnap(currentMouse, [startPoint]);
@@ -1372,11 +1446,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }
         }
         setInteraction({ type: 'IDLE' });
+        // Don't exit edge draw mode automatically - keep it active until user explicitly toggles it
         return;
       }
 
       // Handle STANDALONE_EDGE_PLACING confirmation
       if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+        // Only allow confirmation in triangle edit mode
+        if (!triangleEditMode) {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
         if (onAddTriangleFromEdge) {
           const { edgeId, p1, p2, currentMouse } = interaction;
           const snappedMouse = applySnap(currentMouse, [p1, p2]);
@@ -1388,11 +1468,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }
         }
         setInteraction({ type: 'IDLE' });
+        // Don't exit edge draw mode - keep it active
         return;
       }
 
       // Handle EXTENDING_EDGE confirmation
       if (interaction.type === 'EXTENDING_EDGE') {
+        // Only allow confirmation in edge edit mode
+        if (!edgeEditMode) {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
         if (onAddStandaloneEdge) {
           const { fromPoint, currentMouse } = interaction;
           const snappedMouse = applySnap(currentMouse, [fromPoint]);
@@ -1415,30 +1501,44 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         return;
       }
 
+      // Edge edit mode: start DRAWING_EDGE on first tap
+      // In edit modes, disable pan/zoom operations and only handle entity generation
+      if (edgeEditMode || triangleEditMode) {
+        // パンニング操作が終了した直後はエッジ生成を開始しない
+        if (panningJustEndedRef.current) {
+          return;
+        }
+        // Only start DRAWING_EDGE in edge edit mode
+        if (edgeEditMode && interaction.type === 'IDLE') {
+          const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
+          const startPoint = applySnap(worldPoint, []);
+          setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
+          return;
+        }
+        // In edit modes, allow SELECT_RECT but don't start pan
+        if (!editingDim) {
+          const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
+          startBackgroundLongPress(pointer.clientX, pointer.clientY, worldPoint);
+        }
+        return;
+      }
+
       // Default: start long press timer and PAN_READY
       if (!editingDim) {
         const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
         startBackgroundLongPress(pointer.clientX, pointer.clientY, worldPoint);
         setInteraction({ type: 'PAN_READY', startX: pointer.clientX, startY: pointer.clientY });
       }
-    }, [interaction, triangles, standaloneEdges, editingDim, occupiedEdges,
+    }, [interaction, triangles, standaloneEdges, editingDim, occupiedEdges, edgeEditMode, triangleEditMode,
       onMoveTriangles, onMoveStandaloneEdges, onRootPlacingComplete,
       onAddAttachedTriangle, onVertexReshape, onAddStandaloneEdge,
       onAddTriangleFromEdge, applySnap, isFlipSide, getWorldPointFromClient,
       startBackgroundLongPress, addLog]),
 
     onPointerMove: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
-      // Cancel long press if moved too much
-      if (longPressStartPosRef.current && longPressTimerRef.current) {
-        const dx = pointer.clientX - longPressStartPosRef.current.x;
-        const dy = pointer.clientY - longPressStartPosRef.current.y;
-        if (Math.sqrt(dx * dx + dy * dy) > 5) {
-          cancelLongPress();
-        }
-      }
-
       const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
 
+      // Handle SELECT_RECT and MOVING_SELECTION first (allowed in all modes)
       if (interaction.type === 'SELECT_RECT') {
         setInteraction({ ...interaction, currentWorld: worldPoint });
         return;
@@ -1448,6 +1548,42 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         setInteraction({ ...interaction, currentWorld: worldPoint });
         return;
       }
+
+      // In edit modes, only handle entity generation, disable pan/zoom
+      if (edgeEditMode || triangleEditMode) {
+        // Update mouse position for edge-related modes (edge edit mode)
+        if (edgeEditMode && (interaction.type === 'DRAWING_EDGE' || interaction.type === 'EXTENDING_EDGE')) {
+          setInteraction({ ...interaction, currentMouse: worldPoint });
+        }
+        // Update mouse position for triangle-related modes (triangle edit mode)
+        if (triangleEditMode && (interaction.type === 'PHANTOM_PLACING' || 
+            interaction.type === 'VERTEX_RESHAPING' || 
+            interaction.type === 'STANDALONE_EDGE_PLACING')) {
+          setInteraction({ ...interaction, currentMouse: worldPoint });
+        }
+        return;
+      }
+
+      // If not in appropriate edit mode, cancel creation states
+      if ((interaction.type === 'DRAWING_EDGE' || interaction.type === 'EXTENDING_EDGE') && !edgeEditMode) {
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+      if ((interaction.type === 'PHANTOM_PLACING' || interaction.type === 'VERTEX_RESHAPING' || 
+           interaction.type === 'STANDALONE_EDGE_PLACING') && !triangleEditMode) {
+        setInteraction({ type: 'IDLE' });
+        return;
+      }
+
+      // Cancel long press if moved too much
+      if (longPressStartPosRef.current && longPressTimerRef.current) {
+        const dx = pointer.clientX - longPressStartPosRef.current.x;
+        const dy = pointer.clientY - longPressStartPosRef.current.y;
+        if (Math.sqrt(dx * dx + dy * dy) > 5) {
+          cancelLongPress();
+        }
+      }
+
 
       if (interaction.type === 'PAN_READY') {
         const dist = Math.sqrt(Math.pow(pointer.clientX - interaction.startX, 2) + Math.pow(pointer.clientY - interaction.startY, 2));
@@ -1473,18 +1609,34 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
 
       // Update mouse position for various creation modes
-      if (interaction.type === 'PHANTOM_PLACING' ||
+      // For edge-related modes, only update if in edge edit mode
+      if (interaction.type === 'DRAWING_EDGE' || interaction.type === 'EXTENDING_EDGE') {
+        if (edgeEditMode) {
+          setInteraction({ ...interaction, currentMouse: worldPoint });
+        } else {
+          // Cancel if not in edge edit mode
+          setInteraction({ type: 'IDLE' });
+        }
+      } else if (interaction.type === 'PHANTOM_PLACING' ||
         interaction.type === 'VERTEX_RESHAPING' ||
-        interaction.type === 'DRAWING_EDGE' ||
-        interaction.type === 'STANDALONE_EDGE_PLACING' ||
-        interaction.type === 'EXTENDING_EDGE' ||
-        interaction.type === 'ROOT_PLACING_ORIGIN' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING') {
+        // For triangle-related modes, only update if in triangle edit mode
+        if (triangleEditMode) {
+          setInteraction({ ...interaction, currentMouse: worldPoint });
+        } else {
+          // Cancel if not in triangle edit mode
+          setInteraction({ type: 'IDLE' });
+        }
+      } else if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
         interaction.type === 'ROOT_PLACING_ANGLE') {
         setInteraction({ ...interaction, currentMouse: worldPoint });
       }
-    }, [interaction, cancelLongPress, getWorldPointFromClient]),
+    }, [interaction, edgeEditMode, triangleEditMode, cancelLongPress, getWorldPointFromClient]),
 
     onPointerUp: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
+      // Mark pointer as released
+      isPointerDownRef.current = false;
+      
       addLog(`PointerUp: type=${pointer.pointerType}, id=${pointer.id}, interaction=${interaction.type}`);
 
       // Creation modes: finger lift does NOT confirm anymore
@@ -1550,21 +1702,55 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
 
       // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
+      // But only if in appropriate edit mode
       if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
-        interaction.type === 'ROOT_PLACING_ANGLE' ||
-        interaction.type === 'PHANTOM_PLACING' ||
-        interaction.type === 'VERTEX_RESHAPING' ||
-        interaction.type === 'DRAWING_EDGE' ||
-        interaction.type === 'STANDALONE_EDGE_PLACING' ||
-        interaction.type === 'EXTENDING_EDGE') {
+        interaction.type === 'ROOT_PLACING_ANGLE') {
         return;
+      }
+      
+      // Edge-related modes: only persist if in edge edit mode
+      if (interaction.type === 'DRAWING_EDGE' || interaction.type === 'EXTENDING_EDGE') {
+        if (edgeEditMode) {
+          return;
+        } else {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
+      }
+      
+      // Triangle-related modes: only persist if in triangle edit mode
+      if (interaction.type === 'PHANTOM_PLACING' ||
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING') {
+        if (triangleEditMode) {
+          return;
+        } else {
+          setInteraction({ type: 'IDLE' });
+          return;
+        }
       }
 
       if (interaction.type === 'EDGE_READY') {
         onEdgeSelect(interaction.tId, interaction.index);
+      } else if (interaction.type === 'PANNING') {
+        // PANNING操作が終了した場合、エッジ生成を開始しない
+        // パンニング操作が実際に行われたので、背景クリックとして扱わない
+        panningJustEndedRef.current = true;
+        // 短い時間後にフラグをリセット（次のクリックイベントを防ぐため）
+        setTimeout(() => {
+          panningJustEndedRef.current = false;
+        }, 100);
+        setSelectedIds(new Set());
       } else if (interaction.type === 'PAN_READY') {
-        if (onBackgroundClick) {
-          onBackgroundClick();
+        // PAN_READY状態で終了した場合、実際にパンニングが開始されたかチェック
+        // 移動距離が小さい場合のみ背景クリックとして扱う
+        const { startX, startY } = interaction;
+        const dist = Math.sqrt(Math.pow(pointer.clientX - startX, 2) + Math.pow(pointer.clientY - startY, 2));
+        // 移動距離が3ピクセル未満の場合のみ背景クリックとして扱う
+        if (dist < 3 && !panningJustEndedRef.current) {
+          if (onBackgroundClick) {
+            onBackgroundClick();
+          }
         }
         setSelectedIds(new Set());
       }
@@ -1576,9 +1762,29 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       isTriangleInRect, isEdgeInRect, addLog]),
 
     onLongPress: useCallback((clientX: number, clientY: number, target: Konva.Node) => {
+      // Only proceed if pointer is still pressed down (click and hold)
+      if (!isPointerDownRef.current) {
+        return;
+      }
+
       // Get entity info from target
       const targetName = target.name();
       addLog(`LongPress: target=${targetName}`);
+
+      // Background long press - always allow SELECT_RECT (even in edit modes)
+      if (targetName === 'background-rect') {
+        // Long press on background ONLY - start SELECT_RECT (only if still holding)
+        if (isPointerDownRef.current) {
+          const worldPoint = getWorldPointFromClient(clientX, clientY);
+          setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
+        }
+        return;
+      }
+
+      // In edit modes, disable context menu for entities (but allow SELECT_RECT on background)
+      if (edgeEditMode || triangleEditMode) {
+        return;
+      }
 
       // Check if it's a triangle-related element (fill, edge, label, vertex)
       if (targetName.startsWith('triangle-fill-')) {
@@ -1600,36 +1806,32 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       } else if (targetName.startsWith('standalone-edge-')) {
         const edgeId = targetName.replace('standalone-edge-', '');
         setContextMenu({ x: clientX, y: clientY, targetType: 'edge', targetId: edgeId });
-      } else if (targetName === 'background-rect') {
-        // Long press on background ONLY - start SELECT_RECT
-        const worldPoint = getWorldPointFromClient(clientX, clientY);
-        setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
       }
       // For any other unnamed elements (grid lines, etc.), do nothing
-    }, [getWorldPointFromClient, addLog]),
+    }, [edgeEditMode, triangleEditMode, getWorldPointFromClient, addLog]),
 
     onDoubleTap: useCallback((clientX: number, clientY: number, target: Konva.Node, evt: PointerEvent) => {
-      const targetName = target.name();
-      addLog(`DoubleTap: target=${targetName}`);
-
-      // Double tap on background starts edge drawing
-      if (targetName === 'background-rect' || !targetName) {
-        const worldPoint = getWorldPointFromClient(clientX, clientY);
-        const startPoint: Point = { id: generateId(), x: worldPoint.x, y: worldPoint.y };
-        addLog(`DoubleTap: Starting DRAWING_EDGE at (${worldPoint.x.toFixed(1)}, ${worldPoint.y.toFixed(1)})`);
-        setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
-      }
-    }, [getWorldPointFromClient, addLog]),
+      // Double tap is no longer used - all operations are single tap now
+      // This callback is kept for compatibility but does nothing
+    }, []),
 
     onPinchStart: useCallback((centerX: number, centerY: number, distance: number) => {
+      // In edit modes, disable pinch zoom
+      if (edgeEditMode || triangleEditMode) {
+        return;
+      }
       if (stageRef.current) {
         pinchBaseScaleRef.current = stageRef.current.scaleX();
         pinchBasePosRef.current = { x: stageRef.current.x(), y: stageRef.current.y() };
       }
       addLog(`PinchStart: center=(${centerX.toFixed(0)}, ${centerY.toFixed(0)}), dist=${distance.toFixed(0)}`);
-    }, [addLog]),
+    }, [edgeEditMode, triangleEditMode, addLog]),
 
     onPinchMove: useCallback((centerX: number, centerY: number, scale: number, distance: number) => {
+      // In edit modes, disable pinch zoom
+      if (edgeEditMode || triangleEditMode) {
+        return;
+      }
       if (!stageRef.current || !containerRef.current) return;
 
       const stage = stageRef.current;
@@ -1702,6 +1904,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   };
 
   const handleLabelClick = (tId: string, index: 0 | 1 | 2, currentLen: number, label: string, labelX: number, labelY: number, angle: number, fontSize: number) => {
+    // Only allow triangle dimension editing in triangle edit mode
+    if (!triangleEditMode) return;
     if (label === 'Ref') return;
     setEditingDim({ tId, index, value: currentLen.toFixed(2), originalValue: currentLen, label: label || '' });
     setEditingEdgeDim(null); // Clear edge editing if any
@@ -1725,6 +1929,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   };
 
   const handleEdgeLabelClick = (edgeId: string, currentLen: number, labelX: number, labelY: number, fontSize: number) => {
+    // Only allow edge dimension editing in edge edit mode
+    if (!edgeEditMode) return;
     setEditingEdgeDim({ edgeId, value: currentLen.toFixed(2), originalValue: currentLen });
     setEditingDim(null); // Clear triangle dim editing if any
 
@@ -1824,14 +2030,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             stroke="transparent"
             strokeWidth={20}
             {...clickHandlers(
-              // Single click/tap: select edge
-              (e) => {
-                e.evt.stopPropagation();
-                e.cancelBubble = true;
-                onEdgeSelect(t.id, index);
-              },
-              // Double click/tap: enter phantom placing mode
-              !isOccupied ? (e) => {
+              // Single click/tap: enter phantom placing mode (if not occupied) or select edge
+              // Only allow triangle generation in triangle edit mode
+              !isOccupied && triangleEditMode ? (e) => {
                 e.evt.stopPropagation();
                 e.cancelBubble = true;
                 const currentMouse = getWorldPoint(e);
@@ -1843,7 +2044,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
                   p2: pEnd,
                   currentMouse
                 });
-              } : undefined
+              } : (e) => {
+                e.evt.stopPropagation();
+                e.cancelBubble = true;
+                onEdgeSelect(t.id, index);
+              }
             )}
             onPointerDown={(e) => {
               e.evt.stopPropagation();
@@ -1965,9 +2170,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         strokeWidth={1}
         opacity={0.7}
         {...clickHandlers(
-          undefined,
-          // Double click/tap: start extending edge from this vertex
-          (e) => {
+          // Single click/tap: start extending edge from this vertex
+          // Only allow edge extension in edge edit mode
+          edgeEditMode ? (e) => {
             e.evt.stopPropagation();
             setInteraction({
               type: 'EXTENDING_EDGE',
@@ -1975,7 +2180,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               fromPoint: point,
               currentMouse: point
             });
-          }
+          } : undefined
         )}
       />
     );
@@ -2010,13 +2215,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           x={labelPos.x}
           y={labelPos.y}
           {...clickHandlers(
-            // Single click/tap: select triangle
-            (e) => {
-              e.evt.stopPropagation();
-              onSelectTriangle(t.id);
-            },
-            // Double click/tap: enter vertex reshaping mode
-            (e) => {
+            // Single click/tap: enter vertex reshaping mode (in triangle edit mode) or select triangle (outside edit mode)
+            triangleEditMode ? (e) => {
               e.evt.stopPropagation();
               setInteraction({
                 type: 'VERTEX_RESHAPING',
@@ -2025,6 +2225,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
                 p2: t.p2,
                 currentMouse: t.p3
               });
+            } : (e) => {
+              e.evt.stopPropagation();
+              onSelectTriangle(t.id);
             }
           )}
         >
@@ -2060,6 +2263,44 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
 
 
+  // Calculate screen position for multiple selected entities (for delete FAB)
+  const getMultiSelectedScreenPosition = useCallback((): { x: number; y: number } | null => {
+    if (selectedIds.size === 0 || !stageRef.current || !containerRef.current) return null;
+
+    const allPoints: Point[] = [];
+
+    // Collect points from selected triangles
+    selectedIds.forEach(id => {
+      const t = triangles.find(tri => tri.id === id);
+      if (t) {
+        allPoints.push(t.p1, t.p2, t.p3);
+      }
+    });
+
+    // Collect points from selected standalone edges
+    selectedIds.forEach(id => {
+      const edge = standaloneEdges.find(e => e.id === id);
+      if (edge) {
+        allPoints.push(edge.p1, edge.p2);
+      }
+    });
+
+    if (allPoints.length === 0) return null;
+
+    // Calculate center of all points
+    const centerX = allPoints.reduce((sum, p) => sum + p.x, 0) / allPoints.length;
+    const centerY = allPoints.reduce((sum, p) => sum + p.y, 0) / allPoints.length;
+
+    // Convert to screen coordinates
+    const sp = worldToStage(centerX, centerY);
+    const stage = stageRef.current;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const screenX = containerRect.left + sp.x * stage.scaleX() + stage.x();
+    const screenY = containerRect.top + sp.y * stage.scaleY() + stage.y();
+
+    return { x: screenX, y: screenY };
+  }, [selectedIds, triangles, standaloneEdges, worldToStage, stageScale, stagePosition]);
+
   // Calculate screen position for selected triangle action button
   const getSelectedTriangleScreenPosition = useCallback((): { x: number; y: number; t: RenderedTriangle } | null => {
     if (!selectedTriangleId || !stageRef.current || !containerRef.current) return null;
@@ -2089,6 +2330,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   // Handler to start reshaping from action button
   const handleStartReshaping = useCallback(() => {
+    // Only allow triangle reshaping in triangle edit mode
+    if (!triangleEditMode) return;
+
     const info = getSelectedTriangleScreenPosition();
     if (!info) return;
     const { t } = info;
@@ -2100,7 +2344,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       p2: t.p2,
       currentMouse: t.p3
     });
-  }, [getSelectedTriangleScreenPosition]);
+  }, [triangleEditMode, getSelectedTriangleScreenPosition]);
 
   // Render selected edge highlight (separate layer for visibility)
   // Works for both triangle edges and standalone edges
@@ -2205,6 +2449,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   // Handler to start triangle placing mode from action button
   // Works for both triangle edges (PHANTOM_PLACING) and standalone edges (STANDALONE_EDGE_PLACING)
   const handleStartTrianglePlacing = useCallback(() => {
+    // Only allow triangle generation in triangle edit mode
+    if (!triangleEditMode) return;
+
     const edgeInfo = getSelectedEdgeScreenPosition();
     if (!edgeInfo || !selectedEdge) return;
 
@@ -2230,7 +2477,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         currentMouse: { id: generateId(), x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
       });
     }
-  }, [selectedEdge, getSelectedEdgeScreenPosition]);
+  }, [triangleEditMode, selectedEdge, getSelectedEdgeScreenPosition]);
 
   // Render standalone edges
   const renderStandaloneEdge = (edge: StandaloneEdge) => {
@@ -2270,24 +2517,23 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             cancelLongPress();
           }}
           onClick={(e) => {
-            e.evt.stopPropagation();
-            addLog(`Edge onClick: ${edge.id}`);
-            // Select standalone edge via unified selection
-            if (onStandaloneEdgeSelect) {
-              onStandaloneEdgeSelect(edge.id);
-            }
-          }}
-          onDblClick={(e) => {
             cancelLongPress();
             e.evt.stopPropagation();
-            // Enter triangle placing mode from this edge
-            setInteraction({
-              type: 'STANDALONE_EDGE_PLACING',
-              edgeId: edge.id,
-              p1: edge.p1,
-              p2: edge.p2,
-              currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
-            });
+            // Enter triangle placing mode from this edge (in triangle edit mode) or select edge (outside edit mode)
+            if (triangleEditMode) {
+              setInteraction({
+                type: 'STANDALONE_EDGE_PLACING',
+                edgeId: edge.id,
+                p1: edge.p1,
+                p2: edge.p2,
+                currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
+              });
+            } else {
+              // Select edge when not in edit mode
+              if (onStandaloneEdgeSelect) {
+                onStandaloneEdgeSelect(edge.id);
+              }
+            }
           }}
           onContextMenu={(e) => {
             e.evt.preventDefault();
@@ -2300,23 +2546,23 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             }
           }}
           onTap={(e) => {
-            e.evt.stopPropagation();
-            // Select standalone edge via unified selection
-            if (onStandaloneEdgeSelect) {
-              onStandaloneEdgeSelect(edge.id);
-            }
-          }}
-          onDblTap={(e) => {
             cancelLongPress();
             e.evt.stopPropagation();
-            // Enter triangle placing mode from this edge
-            setInteraction({
-              type: 'STANDALONE_EDGE_PLACING',
-              edgeId: edge.id,
-              p1: edge.p1,
-              p2: edge.p2,
-              currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
-            });
+            // Enter triangle placing mode from this edge (in triangle edit mode) or select edge (outside edit mode)
+            if (triangleEditMode) {
+              setInteraction({
+                type: 'STANDALONE_EDGE_PLACING',
+                edgeId: edge.id,
+                p1: edge.p1,
+                p2: edge.p2,
+                currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
+              });
+            } else {
+              // Select edge when not in edit mode
+              if (onStandaloneEdgeSelect) {
+                onStandaloneEdgeSelect(edge.id);
+              }
+            }
           }}
         />
         {/* Visible edge */}
@@ -2326,7 +2572,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           strokeWidth={isSelected ? 3 : 2}
           lineCap="round"
         />
-        {/* Endpoint 1 - double-click to extend */}
+        {/* Endpoint 1 - single-click to extend */}
         <Circle
           x={sp1.x}
           y={sp1.y}
@@ -2335,8 +2581,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           stroke="white"
           strokeWidth={2}
           {...clickHandlers(
-            undefined,
-            (e) => {
+            // Only allow edge extension in edge edit mode
+            edgeEditMode ? (e) => {
               e.evt.stopPropagation();
               setInteraction({
                 type: 'EXTENDING_EDGE',
@@ -2344,10 +2590,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
                 fromPoint: edge.p1,
                 currentMouse: edge.p1
               });
-            }
+            } : undefined
           )}
         />
-        {/* Endpoint 2 - double-click to extend */}
+        {/* Endpoint 2 - single-click to extend */}
         <Circle
           x={sp2.x}
           y={sp2.y}
@@ -2356,8 +2602,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           stroke="white"
           strokeWidth={2}
           {...clickHandlers(
-            undefined,
-            (e) => {
+            // Only allow edge extension in edge edit mode
+            edgeEditMode ? (e) => {
               e.evt.stopPropagation();
               setInteraction({
                 type: 'EXTENDING_EDGE',
@@ -2365,7 +2611,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
                 fromPoint: edge.p2,
                 currentMouse: edge.p2
               });
-            }
+            } : undefined
           )}
         />
         {/* Length label - clickable to edit */}
@@ -2393,10 +2639,12 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   // Render edge drawing ghost (for both new edge and extending edge)
   const renderEdgeDrawingGhost = () => {
     let startPoint: Point, currentMouse: Point;
+    let isEdgeEditMode = false;
 
     if (interaction.type === 'DRAWING_EDGE') {
       startPoint = interaction.startPoint;
       currentMouse = interaction.currentMouse;
+      isEdgeEditMode = edgeEditMode;
     } else if (interaction.type === 'EXTENDING_EDGE') {
       startPoint = interaction.fromPoint;
       currentMouse = interaction.currentMouse;
@@ -2417,9 +2665,26 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const charWidth = fontSize * 0.6;
     const textWidth = len.length * charWidth;
     const snapRadius = Math.max(6, fontSize * 0.5);
+    const crosshairSize = Math.max(12, fontSize * 1.5);
 
     return (
       <Group>
+        {/* Red crosshair at first point (for edge edit mode) */}
+        {isEdgeEditMode && (
+          <Group x={sp1.x} y={sp1.y}>
+            <Line
+              points={[-crosshairSize, 0, crosshairSize, 0]}
+              stroke="#ef4444"
+              strokeWidth={2}
+            />
+            <Line
+              points={[0, -crosshairSize, 0, crosshairSize]}
+              stroke="#ef4444"
+              strokeWidth={2}
+            />
+          </Group>
+        )}
+        {/* Edge preview line */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
           stroke="#3b82f6"
@@ -2788,6 +3053,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         stroke="#3b82f6"
         strokeWidth={1}
         dash={[4, 4]}
+        shadowColor="rgba(0, 0, 0, 0.3)"
+        shadowBlur={4}
+        shadowOffset={{ x: 2, y: 2 }}
+        shadowOpacity={0.5}
       />
     );
   };
@@ -2822,7 +3091,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           <GridBackground
             worldBounds={worldBounds}
             worldToStage={worldToStage}
-            onBackgroundDblClick={handleBackgroundDblClick}
+            onBackgroundClick={handleBackgroundClick}
           />
           {/* Render standalone edges */}
           {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
@@ -2847,7 +3116,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       />
 
       {/* Edge Action Button - shows when edge is selected and not occupied */}
-      {(() => {
+      {/* Only show in triangle edit mode (for triangle generation) */}
+      {triangleEditMode && (() => {
         const edgePos = getSelectedEdgeScreenPosition();
         if (!edgePos || interaction.type !== 'IDLE') return null;
         return (
@@ -2860,7 +3130,8 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       })()}
 
       {/* Triangle Action Button - shows when triangle is selected */}
-      {(() => {
+      {/* Only show in triangle edit mode (for triangle reshaping) */}
+      {triangleEditMode && (() => {
         const triPos = getSelectedTriangleScreenPosition();
         if (!triPos || interaction.type !== 'IDLE') return null;
         return (
@@ -2872,12 +3143,100 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         );
       })()}
 
+      {/* Entity Delete FAB - shows when entity is selected (outside edit modes) */}
+      {!edgeEditMode && !triangleEditMode && (() => {
+        // Show delete button for multiple selected entities
+        if (selectedIds.size > 0 && interaction.type === 'IDLE') {
+          const multiPos = getMultiSelectedScreenPosition();
+          if (multiPos) {
+            return (
+              <EntityDeleteFAB
+                x={multiPos.x}
+                y={multiPos.y + 50}
+                entityType="triangle"
+                onDelete={() => {
+                  // Delete all selected entities at once
+                  if (onDeleteMultiple) {
+                    const triangleIds: string[] = [];
+                    const edgeIds: string[] = [];
+                    
+                    selectedIds.forEach(id => {
+                      const t = triangles.find(tri => tri.id === id);
+                      if (t) {
+                        triangleIds.push(id);
+                      } else {
+                        const edge = standaloneEdges.find(e => e.id === id);
+                        if (edge) {
+                          edgeIds.push(id);
+                        }
+                      }
+                    });
+                    
+                    onDeleteMultiple(triangleIds, edgeIds);
+                  } else {
+                    // Fallback to individual deletion if onDeleteMultiple is not provided
+                    selectedIds.forEach(id => {
+                      const t = triangles.find(tri => tri.id === id);
+                      if (t && onDeleteTriangle) {
+                        onDeleteTriangle(id);
+                      }
+                      const edge = standaloneEdges.find(e => e.id === id);
+                      if (edge && onDeleteStandaloneEdge) {
+                        onDeleteStandaloneEdge(id);
+                      }
+                    });
+                  }
+                  setSelectedIds(new Set());
+                }}
+              />
+            );
+          }
+        }
+        // Show delete button for selected triangle (single selection)
+        if (selectedIds.size === 0 && selectedTriangleId && interaction.type === 'IDLE') {
+          const triPos = getSelectedTriangleScreenPosition();
+          if (triPos) {
+            return (
+              <EntityDeleteFAB
+                x={triPos.x}
+                y={triPos.y + 50}
+                entityType="triangle"
+                onDelete={() => {
+                  if (onDeleteTriangle) {
+                    onDeleteTriangle(selectedTriangleId);
+                  }
+                }}
+              />
+            );
+          }
+        }
+        // Show delete button for selected standalone edge (single selection)
+        if (selectedIds.size === 0 && selectedEdge && selectedEdge.type === 'standaloneEdge' && interaction.type === 'IDLE') {
+          const edgePos = getSelectedEdgeScreenPosition();
+          if (edgePos) {
+            return (
+              <EntityDeleteFAB
+                x={edgePos.x}
+                y={edgePos.y + 50}
+                entityType="edge"
+                onDelete={() => {
+                  if (onDeleteStandaloneEdge) {
+                    onDeleteStandaloneEdge(selectedEdge.edgeId);
+                  }
+                }}
+              />
+            );
+          }
+        }
+        return null;
+      })()}
+
       <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
-        <p>• <span className="text-green-600 font-bold">背景2回タップ</span>: エッジ作成</p>
-        <p>• <span className="text-blue-600 font-bold">辺タップ→+ボタン</span>: 三角形を追加</p>
+        <p>• <span className="text-green-600 font-bold">背景タップ</span>: エッジ作成</p>
+        <p>• <span className="text-blue-600 font-bold">辺タップ</span>: 三角形を追加</p>
         <p>• <span className="text-blue-600 font-bold">寸法タップ</span>: 数値を編集</p>
-        <p>• <span className="text-amber-600 font-bold">番号2回タップ</span>: 頂点を移動</p>
+        <p>• <span className="text-amber-600 font-bold">番号タップ</span>: 頂点を移動</p>
         <p>• <span className="text-red-600 font-bold">図形長押し</span>: 移動/削除メニュー</p>
         <p>• <span className="text-purple-600 font-bold">ピンチ</span>: ズーム / <span className="text-purple-600 font-bold">ドラッグ</span>: パン</p>
       </div>
@@ -3113,6 +3472,8 @@ import GeometryCanvas from './components/GeometryCanvas';
 import { Calculator, RefreshCw, Download, Undo2 } from 'lucide-react';
 import { downloadDXF } from './utils/dxfExport';
 import { ConfirmDialog } from './components/ui/ConfirmDialog';
+import { EdgeDrawFAB } from './components/ui/EdgeDrawFAB';
+import { TriangleEditFAB } from './components/ui/TriangleEditFAB';
 
 const App: React.FC = () => {
   // State: The Definition is the source of truth
@@ -3148,6 +3509,12 @@ const App: React.FC = () => {
 
   // Root triangle placement mode
   const [rootPlacingMode, setRootPlacingMode] = useState<{ sideA: number; sideB: number; sideC: number } | null>(null);
+
+  // Edge editing mode (pencil button) - for edge creation and reshaping
+  const [edgeEditMode, setEdgeEditMode] = useState(false);
+  
+  // Triangle editing mode (triangle button) - for triangle creation and reshaping
+  const [triangleEditMode, setTriangleEditMode] = useState(false);
 
   // Clear confirmation dialog
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -3491,6 +3858,35 @@ const App: React.FC = () => {
     if (selectedTriangleId === id) setSelectedTriangleId(null);
   };
 
+  // Delete multiple triangles and edges at once
+  const handleDeleteMultiple = (triangleIds: string[], edgeIds: string[]) => {
+    saveToHistory();
+    
+    // Delete triangles (including children)
+    const idsToDelete = new Set(triangleIds);
+    triangleIds.forEach(id => {
+      // Find all children of this triangle
+      defs.forEach(d => {
+        if (d.attachedToTriangleId === id) {
+          idsToDelete.add(d.id);
+        }
+      });
+    });
+    
+    const filtered = defs.filter(d => !idsToDelete.has(d.id) && !idsToDelete.has(d.attachedToTriangleId || ''));
+    setDefs(renumberTriangles(filtered));
+    
+    // Delete standalone edges
+    if (edgeIds.length > 0) {
+      setStandaloneEdges(prev => prev.filter(e => !edgeIds.includes(e.id)));
+    }
+    
+    // Clear selection if selected items were deleted
+    if (selectedTriangleId && idsToDelete.has(selectedTriangleId)) {
+      setSelectedTriangleId(null);
+    }
+  };
+
   // Delete standalone edge
   const handleDeleteStandaloneEdge = (id: string) => {
     saveToHistory();
@@ -3741,12 +4137,17 @@ const App: React.FC = () => {
           onAddTriangleFromEdge={handleAddTriangleFromEdge}
           onDeleteTriangle={handleDeleteTriangle}
           onDeleteStandaloneEdge={handleDeleteStandaloneEdge}
+          onDeleteMultiple={handleDeleteMultiple}
           onUpdateStandaloneEdgeLength={handleUpdateStandaloneEdgeLength}
           onMoveTriangles={handleMoveTriangles}
           onMoveStandaloneEdges={handleMoveStandaloneEdges}
           rootPlacingMode={rootPlacingMode}
           onRootPlacingComplete={handleRootPlacingComplete}
           onRootPlacingCancel={handleRootPlacingCancel}
+          edgeEditMode={edgeEditMode}
+          onEdgeEditModeChange={setEdgeEditMode}
+          triangleEditMode={triangleEditMode}
+          onTriangleEditModeChange={setTriangleEditMode}
         />
 
         {/* Placement mode overlay */}
@@ -3761,6 +4162,30 @@ const App: React.FC = () => {
             </button>
           </div>
         )}
+
+        {/* Edge Edit FAB (Pencil) */}
+        <EdgeDrawFAB
+          isActive={edgeEditMode}
+          onToggle={() => {
+            setEdgeEditMode(!edgeEditMode);
+            // Turn off triangle edit mode when edge edit mode is activated
+            if (!edgeEditMode) {
+              setTriangleEditMode(false);
+            }
+          }}
+        />
+        
+        {/* Triangle Edit FAB */}
+        <TriangleEditFAB
+          isActive={triangleEditMode}
+          onToggle={() => {
+            setTriangleEditMode(!triangleEditMode);
+            // Turn off edge edit mode when triangle edit mode is activated
+            if (!triangleEditMode) {
+              setEdgeEditMode(false);
+            }
+          }}
+        />
       </div>
 
       {/* Clear confirmation dialog */}

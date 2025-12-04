@@ -6,6 +6,8 @@ import GeometryCanvas from './components/GeometryCanvas';
 import { Calculator, RefreshCw, Download, Undo2 } from 'lucide-react';
 import { downloadDXF } from './utils/dxfExport';
 import { ConfirmDialog } from './components/ui/ConfirmDialog';
+import { EdgeDrawFAB } from './components/ui/EdgeDrawFAB';
+import { TriangleEditFAB } from './components/ui/TriangleEditFAB';
 
 const App: React.FC = () => {
   // State: The Definition is the source of truth
@@ -41,6 +43,12 @@ const App: React.FC = () => {
 
   // Root triangle placement mode
   const [rootPlacingMode, setRootPlacingMode] = useState<{ sideA: number; sideB: number; sideC: number } | null>(null);
+
+  // Edge editing mode (pencil button) - for edge creation and reshaping
+  const [edgeEditMode, setEdgeEditMode] = useState(false);
+  
+  // Triangle editing mode (triangle button) - for triangle creation and reshaping
+  const [triangleEditMode, setTriangleEditMode] = useState(false);
 
   // Clear confirmation dialog
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -384,6 +392,35 @@ const App: React.FC = () => {
     if (selectedTriangleId === id) setSelectedTriangleId(null);
   };
 
+  // Delete multiple triangles and edges at once
+  const handleDeleteMultiple = (triangleIds: string[], edgeIds: string[]) => {
+    saveToHistory();
+    
+    // Delete triangles (including children)
+    const idsToDelete = new Set(triangleIds);
+    triangleIds.forEach(id => {
+      // Find all children of this triangle
+      defs.forEach(d => {
+        if (d.attachedToTriangleId === id) {
+          idsToDelete.add(d.id);
+        }
+      });
+    });
+    
+    const filtered = defs.filter(d => !idsToDelete.has(d.id) && !idsToDelete.has(d.attachedToTriangleId || ''));
+    setDefs(renumberTriangles(filtered));
+    
+    // Delete standalone edges
+    if (edgeIds.length > 0) {
+      setStandaloneEdges(prev => prev.filter(e => !edgeIds.includes(e.id)));
+    }
+    
+    // Clear selection if selected items were deleted
+    if (selectedTriangleId && idsToDelete.has(selectedTriangleId)) {
+      setSelectedTriangleId(null);
+    }
+  };
+
   // Delete standalone edge
   const handleDeleteStandaloneEdge = (id: string) => {
     saveToHistory();
@@ -634,12 +671,17 @@ const App: React.FC = () => {
           onAddTriangleFromEdge={handleAddTriangleFromEdge}
           onDeleteTriangle={handleDeleteTriangle}
           onDeleteStandaloneEdge={handleDeleteStandaloneEdge}
+          onDeleteMultiple={handleDeleteMultiple}
           onUpdateStandaloneEdgeLength={handleUpdateStandaloneEdgeLength}
           onMoveTriangles={handleMoveTriangles}
           onMoveStandaloneEdges={handleMoveStandaloneEdges}
           rootPlacingMode={rootPlacingMode}
           onRootPlacingComplete={handleRootPlacingComplete}
           onRootPlacingCancel={handleRootPlacingCancel}
+          edgeEditMode={edgeEditMode}
+          onEdgeEditModeChange={setEdgeEditMode}
+          triangleEditMode={triangleEditMode}
+          onTriangleEditModeChange={setTriangleEditMode}
         />
 
         {/* Placement mode overlay */}
@@ -654,6 +696,30 @@ const App: React.FC = () => {
             </button>
           </div>
         )}
+
+        {/* Edge Edit FAB (Pencil) */}
+        <EdgeDrawFAB
+          isActive={edgeEditMode}
+          onToggle={() => {
+            setEdgeEditMode(!edgeEditMode);
+            // Turn off triangle edit mode when edge edit mode is activated
+            if (!edgeEditMode) {
+              setTriangleEditMode(false);
+            }
+          }}
+        />
+        
+        {/* Triangle Edit FAB */}
+        <TriangleEditFAB
+          isActive={triangleEditMode}
+          onToggle={() => {
+            setTriangleEditMode(!triangleEditMode);
+            // Turn off edge edit mode when triangle edit mode is activated
+            if (!triangleEditMode) {
+              setEdgeEditMode(false);
+            }
+          }}
+        />
       </div>
 
       {/* Clear confirmation dialog */}

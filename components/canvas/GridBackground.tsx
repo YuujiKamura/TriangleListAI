@@ -11,16 +11,16 @@ interface GridBackgroundProps {
             h: number;
       };
       worldToStage: (wx: number, wy: number) => { x: number; y: number };
-      onBackgroundDblClick: (e: KonvaEventObject<any>) => void;
+      onBackgroundClick: (e: KonvaEventObject<any>) => void;
 }
 
 export const GridBackground: React.FC<GridBackgroundProps> = ({
       worldBounds,
       worldToStage,
-      onBackgroundDblClick
+      onBackgroundClick
 }) => {
       // Use unified handlers to ensure mouse/touch parity
-      const backgroundHandlers = useClickHandlers(undefined, onBackgroundDblClick);
+      const backgroundHandlers = useClickHandlers(onBackgroundClick);
 
       const step = 1;
       const startX = Math.floor(worldBounds.x / step) * step;
@@ -33,7 +33,7 @@ export const GridBackground: React.FC<GridBackgroundProps> = ({
 
       const elements = [];
 
-      // Background rect for catching double-clicks on empty areas
+      // Background rect for catching clicks on empty areas
       elements.push(
             <Rect
                   key="background-rect"
