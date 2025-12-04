@@ -1,5 +1,5 @@
 # TriangleListAI - Merged Codebase for AI Analysis
-# Generated: Thu, Dec  4, 2025  3:30:16 PM
+# Generated: Thu, Dec  4, 2025  3:32:35 PM
 # This file is for AI Studio import. Original files are preserved.
 
 //===============================================================================
@@ -2755,11 +2755,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
       <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
-        <p>• <span className="text-green-600 font-bold">背景ダブルタップ</span>: エッジ作成</p>
+        <p>• <span className="text-green-600 font-bold">背景2回タップ</span>: エッジ作成</p>
         <p>• <span className="text-blue-600 font-bold">辺タップ</span>: 三角形を追加</p>
         <p>• <span className="text-blue-600 font-bold">寸法タップ</span>: 数値を編集</p>
-        <p>• <span className="text-amber-600 font-bold">番号ダブルタップ</span>: 頂点を移動</p>
-        <p>• <span className="text-slate-600 font-bold">長押し</span>: コンテキストメニュー</p>
+        <p>• <span className="text-amber-600 font-bold">番号2回タップ</span>: 頂点を移動</p>
+        <p>• <span className="text-red-600 font-bold">図形長押し</span>: 移動/削除メニュー</p>
         <p>• <span className="text-purple-600 font-bold">ピンチ</span>: ズーム / <span className="text-purple-600 font-bold">ドラッグ</span>: パン</p>
       </div>
 
