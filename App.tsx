@@ -685,10 +685,10 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden relative">
-        
-        {/* Canvas Area - Always full width */}
-        <div className="flex-1 flex flex-col relative bg-slate-100">
+      <div className="flex-1 overflow-hidden relative">
+
+        {/* Canvas Area - Full screen, under sidebar */}
+        <div className="absolute inset-0 flex flex-col bg-slate-100">
           <GeometryCanvas
             triangles={geometry.triangles}
             mode={ToolMode.VIEW}
