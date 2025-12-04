@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { RenderedTriangle, TriangleDef, ToolMode, StandaloneEdge, Point } from './types';
+import { RenderedTriangle, TriangleDef, ToolMode, StandaloneEdge, Point, EdgeSelection } from './types';
 import { generateId, recalculateGeometry, isValidRootTriangle, isValidAttachedTriangle, distance } from './utils/geometryUtils';
 import { PALETTE } from './constants';
 import GeometryCanvas from './components/GeometryCanvas';
@@ -33,7 +33,7 @@ const App: React.FC = () => {
 
   // Selection State
   const [selectedTriangleId, setSelectedTriangleId] = useState<string | null>(null);
-  const [selectedEdge, setSelectedEdge] = useState<{ triangleId: string, edgeIndex: 0 | 1 | 2 } | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<EdgeSelection | null>(null);
 
   // Standalone edges
   const [standaloneEdges, setStandaloneEdges] = useState<StandaloneEdge[]>([]);
@@ -596,10 +596,10 @@ const App: React.FC = () => {
           selectedTriangleId={selectedTriangleId}
           onSelectTriangle={setSelectedTriangleId}
           onEdgeSelect={(tId, idx) => {
-            setSelectedEdge({ triangleId: tId, edgeIndex: idx });
+            setSelectedEdge({ type: 'triangleEdge', triangleId: tId, edgeIndex: idx });
           }}
           onEdgeDoubleClick={(tId, idx) => {
-            setSelectedEdge({ triangleId: tId, edgeIndex: idx });
+            setSelectedEdge({ type: 'triangleEdge', triangleId: tId, edgeIndex: idx });
           }}
           onDimensionChange={handleDimensionUpdate}
           onAddAttachedTriangle={handleCanvasAddTriangle}
@@ -608,6 +608,9 @@ const App: React.FC = () => {
           selectedEdge={selectedEdge}
           occupiedEdges={occupiedEdges}
           standaloneEdges={standaloneEdges}
+          onStandaloneEdgeSelect={(edgeId) => {
+            setSelectedEdge({ type: 'standaloneEdge', edgeId });
+          }}
           onAddStandaloneEdge={handleAddStandaloneEdge}
           onAddTriangleFromEdge={handleAddTriangleFromEdge}
           onDeleteTriangle={handleDeleteTriangle}

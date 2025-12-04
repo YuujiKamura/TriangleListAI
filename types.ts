@@ -60,3 +60,29 @@ export interface StandaloneEdge {
   p2: Point;
   length: number;
 }
+
+// Unified edge selection - works for both triangle edges and standalone edges
+export type EdgeSelection =
+  | { type: 'triangleEdge'; triangleId: string; edgeIndex: 0 | 1 | 2 }
+  | { type: 'standaloneEdge'; edgeId: string };
+
+// Helper to get edge endpoints from selection
+export function getEdgePoints(
+  selection: EdgeSelection,
+  triangles: RenderedTriangle[],
+  standaloneEdges: StandaloneEdge[]
+): { p1: Point; p2: Point } | null {
+  if (selection.type === 'triangleEdge') {
+    const triangle = triangles.find(t => t.id === selection.triangleId);
+    if (!triangle) return null;
+    switch (selection.edgeIndex) {
+      case 0: return { p1: triangle.p1, p2: triangle.p2 };
+      case 1: return { p1: triangle.p2, p2: triangle.p3 };
+      case 2: return { p1: triangle.p3, p2: triangle.p1 };
+    }
+  } else {
+    const edge = standaloneEdges.find(e => e.id === selection.edgeId);
+    if (!edge) return null;
+    return { p1: edge.p1, p2: edge.p2 };
+  }
+}

@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { Stage, Layer, Line, Text, Group, Shape, Rect, Circle } from 'react-konva';
 import Konva from 'konva';
-import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
+import { RenderedTriangle, ToolMode, Point, StandaloneEdge, EdgeSelection, getEdgePoints } from '../types';
 import { getCentroid, distance, generateId, calculateThirdPoint } from '../utils/geometryUtils';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 import { GridBackground } from './canvas/GridBackground';
@@ -9,6 +9,8 @@ import { CanvasControls } from './ui/CanvasControls';
 import { ContextMenu } from './ui/ContextMenu';
 import { DeleteConfirmationDialog } from './ui/DeleteConfirmationDialog';
 import { DebugConsole } from './ui/DebugConsole';
+import { EdgeActionButton } from './ui/EdgeActionButton';
+import { TriangleActionButton } from './ui/TriangleActionButton';
 import { usePointer, GESTURE_CONSTANTS, PointerInfo } from '../hooks/usePointer';
 
 interface GeometryCanvasProps {
@@ -22,9 +24,10 @@ interface GeometryCanvasProps {
   onAddAttachedTriangle?: (triangleId: string, edgeIndex: 0 | 1 | 2, sideLeft: number, sideRight: number, flip: boolean) => void;
   onVertexReshape?: (triangleId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
   onBackgroundClick?: () => void;
-  selectedEdge: { triangleId: string, edgeIndex: 0 | 1 | 2 } | null;
+  selectedEdge: EdgeSelection | null;
   occupiedEdges?: Set<string>;
   standaloneEdges?: StandaloneEdge[];
+  onStandaloneEdgeSelect?: (edgeId: string) => void;
   onAddStandaloneEdge?: (p1: Point, p2: Point) => void;
   onAddTriangleFromEdge?: (edgeId: string, sideLeft: number, sideRight: number, flip: boolean) => void;
   onDeleteTriangle?: (id: string) => void;
@@ -44,7 +47,7 @@ type InteractionState =
   | { type: 'PANNING'; lastX: number; lastY: number }
   | { type: 'SELECT_RECT'; startWorld: Point; currentWorld: Point }
   | { type: 'EDGE_READY'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; startX: number; startY: number }
-  | { type: 'EDGE_DRAGGING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
+
   | { type: 'PHANTOM_PLACING'; tId: string; index: 0 | 1 | 2; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'VERTEX_RESHAPING'; tId: string; p1: Point; p2: Point; currentMouse: Point }
   | { type: 'DRAWING_EDGE'; startPoint: Point; currentMouse: Point }
@@ -79,6 +82,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   selectedEdge,
   occupiedEdges,
   standaloneEdges = [],
+  onStandaloneEdgeSelect,
   onAddStandaloneEdge,
   onAddTriangleFromEdge,
   onDeleteTriangle,
@@ -282,7 +286,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   }, []);
 
   // Get world point from stage event (supports both mouse and pointer events)
-  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<MouseEvent | PointerEvent>): Point => {
+  const getWorldPoint = useCallback((evt: Konva.KonvaEventObject<any>): Point => {
     if (!stageRef.current) return { id: generateId(), x: 0, y: 0 };
     const stage = stageRef.current;
     const pointerPos = stage.getPointerPosition();
@@ -502,8 +506,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
   // usePointer hook for unified gesture handling
   const pointerHandlers = usePointer({
-    onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent) => {
-      addLog(`PointerDown: type=${pointer.pointerType}, id=${pointer.id}`);
+    onPointerDown: useCallback((pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTapTrigger?: boolean) => {
+      const targetName = target.name();
+      addLog(`PointerDown: type=${pointer.pointerType}, target=${targetName}, doubleTap=${isDoubleTapTrigger}`);
+
+      // If this is the double-click trigger (mouse only), skip confirmation logic
+      // The double-tap callback already set the interaction state (e.g., DRAWING_EDGE)
+      // and we just need to track pointer movement, not confirm immediately
+      if (isDoubleTapTrigger) {
+        return;
+      }
 
       // If in a creation mode, handle confirmation on next click
       if (interaction.type === 'MOVING_SELECTION') {
@@ -644,6 +656,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         return;
       }
 
+      // Only start PAN_READY on background clicks, not on edges/triangles/etc.
+      // This check is critical because React state updates are async - when an edge's
+      // onPointerDown calls setInteraction, the state hasn't updated yet when Stage's
+      // onPointerDown fires in the same event cycle.
+      const isBackgroundClick = targetName === 'background-rect' || !targetName;
+      if (!isBackgroundClick) {
+        // Clicked on something (edge, triangle, etc.), don't start pan
+        return;
+      }
+
       // Default: start long press timer and PAN_READY
       if (!editingDim) {
         const worldPoint = getWorldPointFromClient(pointer.clientX, pointer.clientY);
@@ -651,10 +673,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         setInteraction({ type: 'PAN_READY', startX: pointer.clientX, startY: pointer.clientY });
       }
     }, [interaction, triangles, standaloneEdges, editingDim, occupiedEdges,
-        onMoveTriangles, onMoveStandaloneEdges, onRootPlacingComplete,
-        onAddAttachedTriangle, onVertexReshape, onAddStandaloneEdge,
-        onAddTriangleFromEdge, applySnap, isFlipSide, getWorldPointFromClient,
-        startBackgroundLongPress, addLog]),
+      onMoveTriangles, onMoveStandaloneEdges, onRootPlacingComplete,
+      onAddAttachedTriangle, onVertexReshape, onAddStandaloneEdge,
+      onAddTriangleFromEdge, applySnap, isFlipSide, getWorldPointFromClient,
+      startBackgroundLongPress, addLog]),
 
     onPointerMove: useCallback((pointer: PointerInfo, evt: PointerEvent) => {
       // Cancel long press if moved too much
@@ -695,22 +717,20 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         return;
       }
 
+      // EDGE_READY should not switch to PANNING. 
+      // This prevents "forced panning" when trying to select an edge with a shaky hand.
       if (interaction.type === 'EDGE_READY') {
-        const dist = Math.sqrt(Math.pow(pointer.clientX - interaction.startX, 2) + Math.pow(pointer.clientY - interaction.startY, 2));
-        if (dist > 5) {
-          setInteraction({ type: 'PANNING', lastX: pointer.clientX, lastY: pointer.clientY });
-        }
         return;
       }
 
       // Update mouse position for various creation modes
       if (interaction.type === 'PHANTOM_PLACING' ||
-          interaction.type === 'VERTEX_RESHAPING' ||
-          interaction.type === 'DRAWING_EDGE' ||
-          interaction.type === 'STANDALONE_EDGE_PLACING' ||
-          interaction.type === 'EXTENDING_EDGE' ||
-          interaction.type === 'ROOT_PLACING_ORIGIN' ||
-          interaction.type === 'ROOT_PLACING_ANGLE') {
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
+        interaction.type === 'EXTENDING_EDGE' ||
+        interaction.type === 'ROOT_PLACING_ORIGIN' ||
+        interaction.type === 'ROOT_PLACING_ANGLE') {
         setInteraction({ ...interaction, currentMouse: worldPoint });
       }
     }, [interaction, cancelLongPress, getWorldPointFromClient]),
@@ -857,12 +877,12 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
       // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
       if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
-          interaction.type === 'ROOT_PLACING_ANGLE' ||
-          interaction.type === 'PHANTOM_PLACING' ||
-          interaction.type === 'VERTEX_RESHAPING' ||
-          interaction.type === 'DRAWING_EDGE' ||
-          interaction.type === 'STANDALONE_EDGE_PLACING' ||
-          interaction.type === 'EXTENDING_EDGE') {
+        interaction.type === 'ROOT_PLACING_ANGLE' ||
+        interaction.type === 'PHANTOM_PLACING' ||
+        interaction.type === 'VERTEX_RESHAPING' ||
+        interaction.type === 'DRAWING_EDGE' ||
+        interaction.type === 'STANDALONE_EDGE_PLACING' ||
+        interaction.type === 'EXTENDING_EDGE') {
         return;
       }
 
@@ -876,28 +896,42 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
       }
       setInteraction({ type: 'IDLE' });
     }, [interaction, triangles, standaloneEdges, occupiedEdges,
-        onMoveTriangles, onMoveStandaloneEdges, onAddStandaloneEdge,
-        onAddAttachedTriangle, onAddTriangleFromEdge, onVertexReshape,
-        onEdgeSelect, onBackgroundClick, applySnap, isFlipSide,
-        isTriangleInRect, isEdgeInRect, addLog]),
+      onMoveTriangles, onMoveStandaloneEdges, onAddStandaloneEdge,
+      onAddAttachedTriangle, onAddTriangleFromEdge, onVertexReshape,
+      onEdgeSelect, onBackgroundClick, applySnap, isFlipSide,
+      isTriangleInRect, isEdgeInRect, addLog]),
 
     onLongPress: useCallback((clientX: number, clientY: number, target: Konva.Node) => {
       // Get entity info from target
       const targetName = target.name();
       addLog(`LongPress: target=${targetName}`);
 
-      // Check if it's a triangle or standalone edge
-      if (targetName.startsWith('triangle-')) {
-        const tId = targetName.replace('triangle-', '');
+      // Check if it's a triangle-related element (fill, edge, label, vertex)
+      if (targetName.startsWith('triangle-fill-')) {
+        const tId = targetName.replace('triangle-fill-', '');
+        setContextMenu({ x: clientX, y: clientY, targetType: 'triangle', targetId: tId });
+      } else if (targetName.startsWith('triangle-edge-')) {
+        // triangle-edge-{tId}-{index} -> extract tId
+        const parts = targetName.replace('triangle-edge-', '').split('-');
+        const tId = parts[0];
+        setContextMenu({ x: clientX, y: clientY, targetType: 'triangle', targetId: tId });
+      } else if (targetName.startsWith('triangle-label-')) {
+        const tId = targetName.replace('triangle-label-', '');
+        setContextMenu({ x: clientX, y: clientY, targetType: 'triangle', targetId: tId });
+      } else if (targetName.startsWith('triangle-vertex-')) {
+        // triangle-vertex-{tId}-{pointId} -> extract tId
+        const parts = targetName.replace('triangle-vertex-', '').split('-');
+        const tId = parts[0];
         setContextMenu({ x: clientX, y: clientY, targetType: 'triangle', targetId: tId });
       } else if (targetName.startsWith('standalone-edge-')) {
         const edgeId = targetName.replace('standalone-edge-', '');
         setContextMenu({ x: clientX, y: clientY, targetType: 'edge', targetId: edgeId });
-      } else if (targetName === 'background-rect' || !targetName) {
-        // Long press on background - start SELECT_RECT
+      } else if (targetName === 'background-rect') {
+        // Long press on background ONLY - start SELECT_RECT
         const worldPoint = getWorldPointFromClient(clientX, clientY);
         setInteraction({ type: 'SELECT_RECT', startWorld: worldPoint, currentWorld: worldPoint });
       }
+      // For any other unnamed elements (grid lines, etc.), do nothing
     }, [getWorldPointFromClient, addLog]),
 
     onDoubleTap: useCallback((clientX: number, clientY: number, target: Konva.Node, evt: PointerEvent) => {
@@ -1072,7 +1106,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     pEnd: Point,
     index: 0 | 1 | 2
   ) => {
-    const isSelectedEdge = selectedEdge?.triangleId === t.id && selectedEdge?.edgeIndex === index;
+    const isSelectedEdge = selectedEdge?.type === 'triangleEdge' && selectedEdge.triangleId === t.id && selectedEdge.edgeIndex === index;
     const isOccupied = occupiedEdges?.has(`${t.id}-${index}`) || false;
     const rawLen = distance(pStart, pEnd);
     const len = rawLen.toFixed(2);
@@ -1111,6 +1145,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         {/* Hit Area & Drag Trigger - skip for Ref edges to not block parent's label */}
         {edgeLabel !== 'Ref' && (
           <Line
+            name={`triangle-edge-${t.id}-${index}`}
             points={[sp1.x, sp1.y, sp2.x, sp2.y]}
             stroke="transparent"
             strokeWidth={20}
@@ -1120,8 +1155,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               // Allow edge selection even if occupied (for highlight)
               onEdgeSelect(t.id, index);
             }}
-            onPointerClick={(e) => {
-              // Pointer click for edge selection (works for both mouse and touch)
+            onTap={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               onEdgeSelect(t.id, index);
@@ -1133,12 +1167,28 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
                 handleEdgePointerDown(e, t.id, index, pStart, pEnd);
               }
             }}
-            onPointerDblClick={(e) => {
+            onDblClick={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
                 // Enter phantom placing mode
-                const currentMouse = getWorldPoint(e as unknown as Konva.KonvaEventObject<MouseEvent>);
+                const currentMouse = getWorldPoint(e);
+                setInteraction({
+                  type: 'PHANTOM_PLACING',
+                  tId: t.id,
+                  index,
+                  p1: pStart,
+                  p2: pEnd,
+                  currentMouse
+                });
+              }
+            }}
+            onDblTap={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                // Enter phantom placing mode
+                const currentMouse = getWorldPoint(e);
                 setInteraction({
                   type: 'PHANTOM_PLACING',
                   tId: t.id,
@@ -1195,6 +1245,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
     return (
       <Shape
+        name={`triangle-fill-${t.id}`}
         key={`fill-${t.id}`}
         sceneFunc={(context, shape) => {
           context.beginPath();
@@ -1253,6 +1304,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     return (
       <Circle
         key={`vertex-${triangleId}-${point.id}`}
+        name={`triangle-vertex-${triangleId}-${point.id}`}
         x={sp.x}
         y={sp.y}
         radius={radius}
@@ -1270,9 +1322,23 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             currentMouse: point
           });
         }}
+        onDblTap={(e) => {
+          e.evt.stopPropagation();
+          // Start extending edge from this vertex
+          setInteraction({
+            type: 'EXTENDING_EDGE',
+            fromEdgeId: triangleId, // Using triangle ID as reference
+            fromPoint: point,
+            currentMouse: point
+          });
+        }}
       />
     );
   };
+
+
+
+  // ... (inside GeometryCanvas component)
 
   // Render Triangle Labels (edges and centroid label) - for top layer
   const renderTriangleLabels = (t: RenderedTriangle) => {
@@ -1295,8 +1361,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         {renderVertexMarker(t.p3, t.id)}
         {/* Triangle Number in Circle */}
         <Group
+          name={`triangle-label-${t.id}`}
           x={labelPos.x}
           y={labelPos.y}
+          onClick={(e) => {
+            e.evt.stopPropagation();
+            onSelectTriangle(t.id);
+          }}
+          onTap={(e) => {
+            e.evt.stopPropagation();
+            onSelectTriangle(t.id);
+          }}
           onDblClick={(e) => {
             e.evt.stopPropagation();
             // Enter vertex reshaping mode
@@ -1344,22 +1419,65 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
+  // ...
+
+
+
+
+
+
+
+  // Calculate screen position for selected triangle action button
+  const getSelectedTriangleScreenPosition = useCallback((): { x: number; y: number; t: RenderedTriangle } | null => {
+    if (!selectedTriangleId || !stageRef.current || !containerRef.current) return null;
+
+    const t = triangles.find(tri => tri.id === selectedTriangleId);
+    if (!t) return null;
+
+    const centroid = getCentroid(t);
+    const sp = worldToStage(centroid.x, centroid.y);
+
+    const stage = stageRef.current;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const screenX = containerRect.left + sp.x * stage.scaleX() + stage.x();
+    const screenY = containerRect.top + sp.y * stage.scaleY() + stage.y();
+
+    // Offset button slightly below the number
+    const uiScale = (worldBounds.w / 50) * stage.scaleX();
+    const fontSize = Math.max(10, 1.2 * uiScale);
+    const offsetY = fontSize * 2.5;
+
+    return {
+      x: screenX,
+      y: screenY + offsetY,
+      t
+    };
+  }, [selectedTriangleId, triangles, worldToStage, stageScale, stagePosition]);
+
+  // Handler to start reshaping from action button
+  const handleStartReshaping = useCallback(() => {
+    const info = getSelectedTriangleScreenPosition();
+    if (!info) return;
+    const { t } = info;
+
+    setInteraction({
+      type: 'VERTEX_RESHAPING',
+      tId: t.id,
+      p1: t.p1,
+      p2: t.p2,
+      currentMouse: t.p3
+    });
+  }, [getSelectedTriangleScreenPosition]);
+
   // Render selected edge highlight (separate layer for visibility)
+  // Works for both triangle edges and standalone edges
   const renderSelectedEdgeHighlight = () => {
     if (!selectedEdge) return null;
 
-    const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
-    if (!t) return null;
+    const edgePoints = getEdgePoints(selectedEdge, triangles, standaloneEdges);
+    if (!edgePoints) return null;
 
-    let p1: Point, p2: Point;
-    if (selectedEdge.edgeIndex === 0) {
-      p1 = t.p1; p2 = t.p2;
-    } else if (selectedEdge.edgeIndex === 1) {
-      p1 = t.p2; p2 = t.p3;
-    } else {
-      p1 = t.p3; p2 = t.p1;
-    }
-
+    const { p1, p2 } = edgePoints;
     const sp1 = worldToStage(p1.x, p1.y);
     const sp2 = worldToStage(p2.x, p2.y);
 
@@ -1384,6 +1502,103 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
+  // Calculate screen position for selected edge action button
+  // Works for both triangle edges and standalone edges
+  const getSelectedEdgeScreenPosition = useCallback((): { x: number; y: number; p1: Point; p2: Point } | null => {
+    if (!selectedEdge || !stageRef.current || !containerRef.current) return null;
+
+    // For triangle edges, check if occupied
+    if (selectedEdge.type === 'triangleEdge') {
+      const isOccupied = occupiedEdges?.has(`${selectedEdge.triangleId}-${selectedEdge.edgeIndex}`) || false;
+      if (isOccupied) return null;
+    }
+
+    const edgePoints = getEdgePoints(selectedEdge, triangles, standaloneEdges);
+    if (!edgePoints) return null;
+
+    const { p1, p2 } = edgePoints;
+
+    // Convert world to stage coordinates
+    const sp1 = worldToStage(p1.x, p1.y);
+    const sp2 = worldToStage(p2.x, p2.y);
+
+    // Calculate midpoint in stage coordinates
+    const stageMidX = (sp1.x + sp2.x) / 2;
+    const stageMidY = (sp1.y + sp2.y) / 2;
+
+    // Convert stage coordinates to screen coordinates
+    const stage = stageRef.current;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const screenX = containerRect.left + stageMidX * stage.scaleX() + stage.x();
+    const screenY = containerRect.top + stageMidY * stage.scaleY() + stage.y();
+
+    // Offset the button perpendicular to the edge
+    const edgeDx = sp2.x - sp1.x;
+    const edgeDy = sp2.y - sp1.y;
+    const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+    if (edgeLen < 1) return null;
+
+    // Normal vector (perpendicular to edge)
+    const normalX = -edgeDy / edgeLen;
+    const normalY = edgeDx / edgeLen;
+
+    // For triangle edges, place button on exterior side (opposite to centroid)
+    // For standalone edges, place button on one side (arbitrarily positive normal)
+    let offsetDirection = 1;
+    if (selectedEdge.type === 'triangleEdge') {
+      const t = triangles.find(tri => tri.id === selectedEdge.triangleId);
+      if (t) {
+        const centroid = getCentroid(t);
+        const centroidStage = worldToStage(centroid.x, centroid.y);
+        const tocentroidX = centroidStage.x - stageMidX;
+        const tocentroidY = centroidStage.y - stageMidY;
+        const dot = tocentroidX * normalX + tocentroidY * normalY;
+        offsetDirection = dot > 0 ? -1 : 1;
+      }
+    }
+
+    const offsetDistance = 15; // pixels from edge center (close to the edge)
+    const offsetX = normalX * offsetDirection * offsetDistance * stage.scaleX();
+    const offsetY = normalY * offsetDirection * offsetDistance * stage.scaleY();
+
+    return {
+      x: screenX + offsetX,
+      y: screenY + offsetY,
+      p1,
+      p2
+    };
+  }, [selectedEdge, triangles, standaloneEdges, occupiedEdges, worldToStage, stageScale, stagePosition]);
+
+  // Handler to start triangle placing mode from action button
+  // Works for both triangle edges (PHANTOM_PLACING) and standalone edges (STANDALONE_EDGE_PLACING)
+  const handleStartTrianglePlacing = useCallback(() => {
+    const edgeInfo = getSelectedEdgeScreenPosition();
+    if (!edgeInfo || !selectedEdge) return;
+
+    const { p1, p2 } = edgeInfo;
+
+    if (selectedEdge.type === 'triangleEdge') {
+      // Start phantom placing mode for triangle edge
+      setInteraction({
+        type: 'PHANTOM_PLACING',
+        tId: selectedEdge.triangleId,
+        index: selectedEdge.edgeIndex,
+        p1,
+        p2,
+        currentMouse: { id: generateId(), x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
+      });
+    } else {
+      // Start standalone edge placing mode
+      setInteraction({
+        type: 'STANDALONE_EDGE_PLACING',
+        edgeId: selectedEdge.edgeId,
+        p1,
+        p2,
+        currentMouse: { id: generateId(), x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
+      });
+    }
+  }, [selectedEdge, getSelectedEdgeScreenPosition]);
+
   // Render standalone edges
   const renderStandaloneEdge = (edge: StandaloneEdge) => {
     const sp1 = worldToStage(edge.p1.x, edge.p1.y);
@@ -1398,12 +1613,14 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const textWidth = lenText.length * charWidth;
     const endpointRadius = Math.max(4, fontSize * 0.4);
 
-    const isMultiSelected = selectedIds.has(edge.id);
+    // Check if this standalone edge is selected (via unified selection or multi-select)
+    const isSelected = (selectedEdge?.type === 'standaloneEdge' && selectedEdge.edgeId === edge.id) || selectedIds.has(edge.id);
 
     return (
       <Group key={`standalone-${edge.id}`}>
         {/* Hit area for double-click on edge body (to create triangle) and long press for context menu */}
         <Line
+          name={`standalone-edge-${edge.id}`}
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
           stroke="rgba(0,0,0,0.001)"
           strokeWidth={20}
@@ -1422,17 +1639,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           onClick={(e) => {
             e.evt.stopPropagation();
             addLog(`Edge onClick: ${edge.id}`);
-            // Select/deselect edge on click
-            setSelectedIds(prev => {
-              const newSet = new Set(prev);
-              if (newSet.has(edge.id)) {
-                newSet.delete(edge.id);
-              } else {
-                newSet.clear(); // Clear other selections
-                newSet.add(edge.id);
-              }
-              return newSet;
-            });
+            // Select standalone edge via unified selection
+            if (onStandaloneEdgeSelect) {
+              onStandaloneEdgeSelect(edge.id);
+            }
           }}
           onDblClick={(e) => {
             cancelLongPress();
@@ -1458,17 +1668,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }}
           onTap={(e) => {
             e.evt.stopPropagation();
-            // Select/deselect edge on tap
-            setSelectedIds(prev => {
-              const newSet = new Set(prev);
-              if (newSet.has(edge.id)) {
-                newSet.delete(edge.id);
-              } else {
-                newSet.clear(); // Clear other selections
-                newSet.add(edge.id);
-              }
-              return newSet;
-            });
+            // Select standalone edge via unified selection
+            if (onStandaloneEdgeSelect) {
+              onStandaloneEdgeSelect(edge.id);
+            }
           }}
           onDblTap={(e) => {
             cancelLongPress();
@@ -1483,20 +1686,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             });
           }}
         />
-        {/* Selection highlight (behind the visible edge) */}
-        {isMultiSelected && (
-          <Line
-            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-            stroke="#93c5fd"
-            strokeWidth={8}
-            lineCap="round"
-          />
-        )}
         {/* Visible edge */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={isMultiSelected ? "#1d4ed8" : "#3b82f6"}
-          strokeWidth={isMultiSelected ? 3 : 2}
+          stroke={isSelected ? "#1d4ed8" : "#3b82f6"}
+          strokeWidth={isSelected ? 3 : 2}
           lineCap="round"
         />
         {/* Endpoint 1 - double-click to extend */}
@@ -1642,9 +1836,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
-  // Render Drag Ghost (for EDGE_DRAGGING, PHANTOM_PLACING, VERTEX_RESHAPING, STANDALONE_EDGE_PLACING)
+  // Render Drag Ghost (for PHANTOM_PLACING, VERTEX_RESHAPING, STANDALONE_EDGE_PLACING)
   const renderDragGhost = () => {
-    if (interaction.type !== 'EDGE_DRAGGING' && interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING' && interaction.type !== 'STANDALONE_EDGE_PLACING') return null;
+    if (interaction.type !== 'PHANTOM_PLACING' && interaction.type !== 'VERTEX_RESHAPING' && interaction.type !== 'STANDALONE_EDGE_PLACING') return null;
     const { p1, p2, currentMouse } = interaction;
 
     // Apply snap for visual feedback (exclude base edge points)
@@ -1981,7 +2175,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     );
   };
 
-  const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING'
+  const cursorStyle = interaction.type === 'PANNING'
     ? 'grabbing'
     : interaction.type === 'MOVING_SELECTION'
       ? 'move'
@@ -2035,10 +2229,36 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         onFitView={handleFitView}
       />
 
+      {/* Edge Action Button - shows when edge is selected and not occupied */}
+      {(() => {
+        const edgePos = getSelectedEdgeScreenPosition();
+        if (!edgePos || interaction.type !== 'IDLE') return null;
+        return (
+          <EdgeActionButton
+            x={edgePos.x}
+            y={edgePos.y}
+            onAddTriangle={handleStartTrianglePlacing}
+          />
+        );
+      })()}
+
+      {/* Triangle Action Button - shows when triangle is selected */}
+      {(() => {
+        const triPos = getSelectedTriangleScreenPosition();
+        if (!triPos || interaction.type !== 'IDLE') return null;
+        return (
+          <TriangleActionButton
+            x={triPos.x}
+            y={triPos.y}
+            onReshape={handleStartReshaping}
+          />
+        );
+      })()}
+
       <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
         <p>• <span className="text-green-600 font-bold">背景2回タップ</span>: エッジ作成</p>
-        <p>• <span className="text-blue-600 font-bold">辺タップ</span>: 三角形を追加</p>
+        <p>• <span className="text-blue-600 font-bold">辺タップ→+ボタン</span>: 三角形を追加</p>
         <p>• <span className="text-blue-600 font-bold">寸法タップ</span>: 数値を編集</p>
         <p>• <span className="text-amber-600 font-bold">番号2回タップ</span>: 頂点を移動</p>
         <p>• <span className="text-red-600 font-bold">図形長押し</span>: 移動/削除メニュー</p>

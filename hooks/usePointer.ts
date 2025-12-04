@@ -21,7 +21,8 @@ export interface PointerInfo {
 }
 
 export interface GestureCallbacks {
-  onPointerDown?: (pointer: PointerInfo, target: Konva.Node, evt: PointerEvent) => void;
+  // isDoubleTapTrigger: true if this pointerDown is the second click of a double-click (mouse only)
+  onPointerDown?: (pointer: PointerInfo, target: Konva.Node, evt: PointerEvent, isDoubleTapTrigger?: boolean) => void;
   onPointerMove?: (pointer: PointerInfo, evt: PointerEvent) => void;
   onPointerUp?: (pointer: PointerInfo, evt: PointerEvent) => void;
   onLongPress?: (clientX: number, clientY: number, target: Konva.Node) => void;
@@ -68,6 +69,16 @@ export function usePointer(callbacks: GestureCallbacks) {
   const checkDoubleTap = useCallback((x: number, y: number, target: Konva.Node, evt: PointerEvent): boolean => {
     const now = Date.now();
     const last = lastTapRef.current;
+    const targetName = target.name();
+
+    // Only detect double-tap on background (not on edges, triangles, etc.)
+    // Other elements have their own onPointerDblClick handlers
+    const isBackground = targetName === 'background-rect' || !targetName;
+    if (!isBackground) {
+      // Reset tap tracking when tapping on non-background elements
+      lastTapRef.current = null;
+      return false;
+    }
 
     if (last) {
       const timeDiff = now - last.time;
@@ -141,25 +152,56 @@ export function usePointer(callbacks: GestureCallbacks) {
       const isDoubleTap = checkDoubleTap(clientX, clientY, e.target, evt);
       if (isDoubleTap) {
         cancelLongPress();
-        return;
+        // For mouse: don't return early - allow normal pointer tracking
+        // The double-tap callback already fired, but mouse users need
+        // subsequent move/up events to continue their workflow
+        // (e.g., double-click to start drawing, then move, then click to confirm)
+        if (pointerType === 'touch') {
+          // Touch users hold finger down after double-tap, so skip onPointerDown
+          return;
+        }
+        // For mouse: fall through to call onPointerDown as well
+        // This allows the interaction state set by onDoubleTap to receive events
       }
 
-      // Start long press detection
-      startLongPress(clientX, clientY, e.target);
+      // Start long press detection (skip if this was a double-tap)
+      if (!isDoubleTap) {
+        startLongPress(clientX, clientY, e.target);
+      }
 
-      // Notify callback
+      // Notify callback (pass isDoubleTap flag so caller knows this is the double-click trigger)
       if (callbacks.onPointerDown) {
-        callbacks.onPointerDown(pointer, e.target, evt);
+        callbacks.onPointerDown(pointer, e.target, evt, isDoubleTap);
       }
     }
   }, [callbacks, cancelLongPress, checkDoubleTap, getPinchInfo, startLongPress]);
 
   const handlePointerMove = useCallback((e: Konva.KonvaEventObject<PointerEvent>) => {
     const evt = e.evt;
-    const { pointerId, clientX, clientY } = evt;
+    const { pointerId, clientX, clientY, pointerType } = evt;
 
     const pointer = pointersRef.current.get(pointerId);
-    if (!pointer) return;
+
+    // For mouse: allow move events even without active pointer (button not pressed)
+    // This is needed for mouse workflows like: double-click to start, move, click to confirm
+    if (!pointer) {
+      if (pointerType === 'mouse') {
+        // Create a temporary pointer info for the callback
+        const tempPointer: PointerInfo = {
+          id: pointerId,
+          clientX,
+          clientY,
+          startX: clientX,
+          startY: clientY,
+          startTime: Date.now(),
+          pointerType: 'mouse',
+        };
+        if (callbacks.onPointerMove) {
+          callbacks.onPointerMove(tempPointer, evt);
+        }
+      }
+      return;
+    }
 
     // Update pointer position
     pointer.clientX = clientX;
