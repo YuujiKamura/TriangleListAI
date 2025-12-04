@@ -735,7 +735,7 @@ const App: React.FC = () => {
 
         {/* Right: Collapsible Sidebar - Overlay style for full canvas when closed */}
         <div
-          className={`absolute top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-xl z-20 transition-transform duration-300 ease-in-out w-96 max-w-[85vw] ${sidebarOpen ? 'translate-x-0' : 'translate-x-full'}`}
+          className={`absolute top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-xl z-20 transition-transform duration-300 ease-in-out w-96 max-w-[85vw] ${sidebarOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'}`}
         >
           {/* Sidebar content always rendered but hidden via transform */}
           <div className={`flex flex-col h-full ${sidebarOpen ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>

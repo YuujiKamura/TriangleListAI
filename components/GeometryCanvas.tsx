@@ -88,6 +88,18 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const [editingEdgeDim, setEditingEdgeDim] = useState<{ edgeId: string, value: string, originalValue: number } | null>(null);
   const [editingInputPos, setEditingInputPos] = useState<{ x: number; y: number; angle: number; fontSize: number } | null>(null);
 
+  // Debug console state
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const addLog = useCallback((msg: string) => {
+    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    setDebugLogs(prev => [...prev.slice(-19), `[${timestamp}] ${msg}`]);
+  }, []);
+
+  // Track interaction state changes
+  useEffect(() => {
+    addLog(`interaction -> ${interaction.type}`);
+  }, [interaction.type, addLog]);
+
   // Initial viewport: -10, -10 to 40, 30 (width: 50, height: 40)
   // CAD-like coordinate system: origin at bottom-left, positive X right, positive Y up
   // But screen Y is inverted, so we use negative Y values for "up"
@@ -1678,6 +1690,25 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           </div>
         </div>
       )}
+
+      {/* Debug Console */}
+      <div className="absolute bottom-0 left-0 right-0 h-24 bg-slate-900 text-green-400 font-mono text-xs overflow-y-auto border-t border-slate-700">
+        <div className="sticky top-0 bg-slate-800 px-2 py-1 flex justify-between items-center border-b border-slate-700">
+          <span className="text-slate-400">Debug: <span className="text-yellow-400">{interaction.type}</span></span>
+          <button
+            onClick={() => setDebugLogs([])}
+            className="text-slate-500 hover:text-white px-2"
+          >
+            Clear
+          </button>
+        </div>
+        <div className="p-2 space-y-0.5">
+          {debugLogs.map((log, i) => (
+            <div key={i} className="whitespace-nowrap">{log}</div>
+          ))}
+          {debugLogs.length === 0 && <div className="text-slate-500">No logs...</div>}
+        </div>
+      </div>
     </div>
   );
 };
