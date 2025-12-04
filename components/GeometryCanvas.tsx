@@ -1541,6 +1541,20 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           onMouseLeave={() => {
             cancelLongPress();
           }}
+          onClick={(e) => {
+            e.evt.stopPropagation();
+            // Select/deselect edge on click
+            setSelectedIds(prev => {
+              const newSet = new Set(prev);
+              if (newSet.has(edge.id)) {
+                newSet.delete(edge.id);
+              } else {
+                newSet.clear(); // Clear other selections
+                newSet.add(edge.id);
+              }
+              return newSet;
+            });
+          }}
           onDblClick={(e) => {
             cancelLongPress();
             e.evt.stopPropagation();
@@ -1563,6 +1577,20 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               startEntityLongPress('edge', edge.id, touch.clientX, touch.clientY);
             }
           }}
+          onTap={(e) => {
+            e.evt.stopPropagation();
+            // Select/deselect edge on tap
+            setSelectedIds(prev => {
+              const newSet = new Set(prev);
+              if (newSet.has(edge.id)) {
+                newSet.delete(edge.id);
+              } else {
+                newSet.clear(); // Clear other selections
+                newSet.add(edge.id);
+              }
+              return newSet;
+            });
+          }}
           onDblTap={(e) => {
             cancelLongPress();
             e.evt.stopPropagation();
@@ -1576,11 +1604,21 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             });
           }}
         />
+        {/* Selection highlight (behind the visible edge) */}
+        {isMultiSelected && (
+          <Line
+            points={[sp1.x, sp1.y, sp2.x, sp2.y]}
+            stroke="#93c5fd"
+            strokeWidth={8}
+            lineCap="round"
+          />
+        )}
         {/* Visible edge */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={isMultiSelected ? "#2563eb" : "#3b82f6"}
+          stroke={isMultiSelected ? "#1d4ed8" : "#3b82f6"}
           strokeWidth={isMultiSelected ? 3 : 2}
+          lineCap="round"
         />
         {/* Endpoint 1 - double-click to extend */}
         <Circle
