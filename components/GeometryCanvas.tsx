@@ -4,6 +4,11 @@ import Konva from 'konva';
 import { RenderedTriangle, ToolMode, Point, StandaloneEdge } from '../types';
 import { getCentroid, distance, generateId, calculateThirdPoint } from '../utils/geometryUtils';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+import { GridBackground } from './canvas/GridBackground';
+import { CanvasControls } from './ui/CanvasControls';
+import { ContextMenu } from './ui/ContextMenu';
+import { DeleteConfirmationDialog } from './ui/DeleteConfirmationDialog';
+import { DebugConsole } from './ui/DebugConsole';
 
 interface GeometryCanvasProps {
   triangles: RenderedTriangle[];
@@ -281,11 +286,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const stage = stageRef.current;
     const pointerPos = stage.getPointerPosition();
     if (!pointerPos) return { id: generateId(), x: 0, y: 0 };
-    
+
     // Get position relative to stage
     const stageX = (pointerPos.x - stage.x()) / stage.scaleX();
     const stageY = (pointerPos.y - stage.y()) / stage.scaleY();
-    
+
     const world = stageToWorld(stageX, stageY);
     return { id: generateId(), x: world.x, y: world.y };
   }, [stageToWorld]);
@@ -396,6 +401,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   }, [triangles, standaloneEdges, getEntitiesBounds, worldToStage]);
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Ignore mouse events immediately after touch events to prevent double firing
+    if (isTouchRef.current) return;
+
     if (e.evt.button === 0 && !editingDim) {
       // If in moving selection mode, confirm the move on click
       if (interaction.type === 'MOVING_SELECTION') {
@@ -577,6 +585,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   };
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Ignore mouse events immediately after touch events to prevent double firing
+    if (isTouchRef.current) return;
+
     // Cancel long press if mouse moved too much
     if (longPressStartPosRef.current && longPressTimerRef.current) {
       const dx = e.evt.clientX - longPressStartPosRef.current.x;
@@ -651,6 +662,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   }, []);
 
   const handleMouseUp = () => {
+    // Ignore mouse events immediately after touch events to prevent double firing
+    if (isTouchRef.current) return;
+
     cancelLongPress();
 
     // Handle MOVING_SELECTION completion
@@ -726,12 +740,12 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
     // Don't reset interaction for placing/drawing modes - they need to persist until confirmed
     if (interaction.type === 'ROOT_PLACING_ORIGIN' ||
-        interaction.type === 'ROOT_PLACING_ANGLE' ||
-        interaction.type === 'PHANTOM_PLACING' ||
-        interaction.type === 'VERTEX_RESHAPING' ||
-        interaction.type === 'DRAWING_EDGE' ||
-        interaction.type === 'STANDALONE_EDGE_PLACING' ||
-        interaction.type === 'EXTENDING_EDGE') {
+      interaction.type === 'ROOT_PLACING_ANGLE' ||
+      interaction.type === 'PHANTOM_PLACING' ||
+      interaction.type === 'VERTEX_RESHAPING' ||
+      interaction.type === 'DRAWING_EDGE' ||
+      interaction.type === 'STANDALONE_EDGE_PLACING' ||
+      interaction.type === 'EXTENDING_EDGE') {
       return;
     }
 
@@ -784,16 +798,51 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const lastTouchDistance = useRef<number | null>(null);
   const lastTapTime = useRef<number>(0);
   const lastTapPos = useRef<{ x: number; y: number } | null>(null);
+  const isTouchRef = useRef<boolean>(false); // Flag to prevent mouse events from firing after touch
   const DOUBLE_TAP_DELAY = 300; // ms
   const DOUBLE_TAP_DISTANCE = 30; // px
 
+  // Helper to create a type-safe fake mouse event
+  const createFakeMouseEvent = (
+    touch: React.Touch | Touch,
+    originalEvent: Konva.KonvaEventObject<TouchEvent>,
+    type: 'mousedown' | 'mousemove' | 'mouseup'
+  ): Konva.KonvaEventObject<MouseEvent> => {
+    const fakeEvt = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      detail: 1,
+      screenX: touch.screenX,
+      screenY: touch.screenY,
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      button: 0,
+      buttons: 1,
+    });
+
+    // We need to cast this to satisfy Konva's type requirements, 
+    // effectively tricking it into treating our constructed MouseEvent as the underlying event
+    return {
+      ...originalEvent,
+      evt: fakeEvt,
+      target: originalEvent.target,
+      currentTarget: originalEvent.currentTarget,
+    } as unknown as Konva.KonvaEventObject<MouseEvent>;
+  };
+
   // Touch event handlers for mobile support
   const handleTouchStart = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    e.evt.preventDefault();
+    isTouchRef.current = true;
     const touches = e.evt.touches;
 
     // Pinch zoom start (2 fingers)
     if (touches.length === 2) {
+      e.evt.preventDefault(); // Always prevent default for pinch zoom
       cancelLongPress();
       const dx = touches[0].clientX - touches[1].clientX;
       const dy = touches[0].clientY - touches[1].clientY;
@@ -807,11 +856,13 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     // Double tap detection
     const now = Date.now();
     const timeSinceLastTap = now - lastTapTime.current;
+
     if (lastTapPos.current && timeSinceLastTap < DOUBLE_TAP_DELAY) {
       const dx = touch.clientX - lastTapPos.current.x;
       const dy = touch.clientY - lastTapPos.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < DOUBLE_TAP_DISTANCE) {
-        // Double tap detected - trigger double click behavior
+        // Double tap detected
+        e.evt.preventDefault(); // Prevent zoom on double tap
         cancelLongPress();
         lastTapTime.current = 0;
         lastTapPos.current = null;
@@ -833,30 +884,25 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     lastTapTime.current = now;
     lastTapPos.current = { x: touch.clientX, y: touch.clientY };
 
+    // If we are touching a shape (not background), prevent default to stop scrolling
+    // The background rect has name 'background-rect'
+    const isBackground = e.target.name() === 'background-rect' || e.target === e.target.getStage();
+
+    if (!isBackground) {
+      // e.evt.preventDefault(); // Commented out to allow scrolling if needed, but usually we want to prevent it for drag
+    }
+
     // Convert touch event to mouse-like event for reuse
-    const fakeEvt = {
-      button: 0,
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-      stopPropagation: () => {},
-      preventDefault: () => {}
-    };
-
-    // Create a fake mouse event object
-    const fakeEvent = {
-      ...e,
-      evt: fakeEvt as unknown as MouseEvent
-    } as unknown as Konva.KonvaEventObject<MouseEvent>;
-
+    const fakeEvent = createFakeMouseEvent(touch, e, 'mousedown');
     handleMouseDown(fakeEvent);
   };
 
   const handleTouchMove = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    e.evt.preventDefault();
     const touches = e.evt.touches;
 
     // Pinch zoom (2 fingers)
     if (touches.length === 2 && lastTouchDistance.current !== null) {
+      e.evt.preventDefault(); // Prevent default for pinch zoom
       const dx = touches[0].clientX - touches[1].clientX;
       const dy = touches[0].clientY - touches[1].clientY;
       const newDistance = Math.sqrt(dx * dx + dy * dy);
@@ -900,31 +946,29 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const touch = touches[0];
     if (!touch) return;
 
-    const fakeEvt = {
-      button: 0,
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-      stopPropagation: () => {},
-      preventDefault: () => {}
-    };
+    // If we are dragging something, prevent default to stop scrolling
+    if (interaction.type !== 'IDLE' && interaction.type !== 'SELECT_RECT') {
+      e.evt.preventDefault();
+    }
 
-    const fakeEvent = {
-      ...e,
-      evt: fakeEvt as unknown as MouseEvent
-    } as unknown as Konva.KonvaEventObject<MouseEvent>;
-
+    const fakeEvent = createFakeMouseEvent(touch, e, 'mousemove');
     handleMouseMove(fakeEvent);
   };
 
   const handleTouchEnd = (e: Konva.KonvaEventObject<TouchEvent>) => {
-    e.evt.preventDefault();
     lastTouchDistance.current = null;
+
+    // Reset isTouch flag after a small delay to ensure any subsequent simulated mouse events are ignored
+    setTimeout(() => {
+      isTouchRef.current = false;
+    }, 100);
+
     handleMouseUp();
   };
 
   const handleZoomBtn = (direction: 'in' | 'out') => {
     if (!stageRef.current) return;
-    
+
     const stage = stageRef.current;
     const oldScale = stage.scaleX();
     const center = {
@@ -958,7 +1002,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const scaleY = rect.height / 800;
     const initialScale = Math.min(scaleX, scaleY) * 0.9;
     setStageScale(initialScale);
-    
+
     const centerX = rect.width / 2 - (1000 * initialScale) / 2;
     const centerY = rect.height / 2 - (800 * initialScale) / 2;
     setStagePosition({ x: centerX, y: centerY });
@@ -1036,62 +1080,6 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setEditingInputPos(null);
   };
 
-  // Render Grid with background rect for double-click handling
-  const renderGrid = () => {
-    const step = 1;
-    const startX = Math.floor(worldBounds.x / step) * step;
-    const startY = Math.floor(worldBounds.y / step) * step;
-    const endX = worldBounds.x + worldBounds.w;
-    const endY = worldBounds.y + worldBounds.h;
-
-    const topLeft = worldToStage(worldBounds.x, worldBounds.y);
-    const bottomRight = worldToStage(endX, endY);
-
-    const elements = [];
-
-    // Background rect for catching double-clicks on empty areas
-    elements.push(
-      <Rect
-        key="background-rect"
-        name="background-rect"
-        x={topLeft.x}
-        y={topLeft.y}
-        width={bottomRight.x - topLeft.x}
-        height={bottomRight.y - topLeft.y}
-        fill="transparent"
-        onDblClick={handleBackgroundDblClick}
-      />
-    );
-
-    for (let x = startX; x <= endX; x += step) {
-      const sp1 = worldToStage(x, worldBounds.y);
-      const sp2 = worldToStage(x, endY);
-      const isMajor = Math.abs(x % (step * 5)) < 0.001 || Math.abs(x) < 0.001;
-      elements.push(
-        <Line
-          key={`v${x}`}
-          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={x === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
-          strokeWidth={x === 0 ? 2 : 1}
-        />
-      );
-    }
-    for (let y = startY; y <= endY; y += step) {
-      const sp1 = worldToStage(worldBounds.x, y);
-      const sp2 = worldToStage(endX, y);
-      const isMajor = Math.abs(y % (step * 5)) < 0.001 || Math.abs(y) < 0.001;
-      elements.push(
-        <Line
-          key={`h${y}`}
-          points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke={y === 0 ? "#94a3b8" : (isMajor ? "#cbd5e1" : "#e2e8f0")}
-          strokeWidth={y === 0 ? 2 : 1}
-        />
-      );
-    }
-    return elements;
-  };
-
   // Render Edge with label
   const renderEdge = (
     t: RenderedTriangle,
@@ -1147,11 +1135,27 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               // Allow edge selection even if occupied (for highlight)
               onEdgeSelect(t.id, index);
             }}
+            onTap={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              onEdgeSelect(t.id, index);
+            }}
             onMouseDown={(e) => {
               e.evt.stopPropagation();
               e.cancelBubble = true;
               if (!isOccupied) {
                 handleEdgeMouseDown(e, t.id, index, pStart, pEnd);
+              }
+            }}
+            onTouchStart={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                const touch = e.evt.touches[0];
+                if (touch) {
+                  const fakeEvent = createFakeMouseEvent(touch, e, 'mousedown');
+                  handleEdgeMouseDown(fakeEvent, t.id, index, pStart, pEnd);
+                }
               }
             }}
             onDblClick={(e) => {
@@ -1160,6 +1164,22 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               if (!isOccupied) {
                 // Enter phantom placing mode
                 const currentMouse = getWorldPoint(e);
+                setInteraction({
+                  type: 'PHANTOM_PLACING',
+                  tId: t.id,
+                  index,
+                  p1: pStart,
+                  p2: pEnd,
+                  currentMouse
+                });
+              }
+            }}
+            onDblTap={(e) => {
+              e.evt.stopPropagation();
+              e.cancelBubble = true;
+              if (!isOccupied) {
+                // Enter phantom placing mode
+                const currentMouse = getWorldPoint(e as unknown as Konva.KonvaEventObject<MouseEvent>);
                 setInteraction({
                   type: 'PHANTOM_PLACING',
                   tId: t.id,
@@ -1196,6 +1216,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               offsetX={labelWidth / 2}
               offsetY={fontSize / 2}
               onClick={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
+              onTap={() => handleLabelClick(t.id, index, rawLen, edgeLabel, labelPos.x, labelPos.y, angle, fontSize)}
             />
           </Group>
         ) : null}
@@ -1242,6 +1263,19 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         onClick={() => {
           cancelLongPress();
           onSelectTriangle(t.id);
+        }}
+        onTap={() => {
+          cancelLongPress();
+          onSelectTriangle(t.id);
+        }}
+        onTouchStart={(e) => {
+          const touch = e.evt.touches[0];
+          if (touch) {
+            startEntityLongPress('triangle', t.id, touch.clientX, touch.clientY);
+          }
+        }}
+        onTouchEnd={() => {
+          cancelLongPress();
         }}
         onContextMenu={(e) => {
           e.evt.preventDefault();
@@ -1305,6 +1339,17 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           x={labelPos.x}
           y={labelPos.y}
           onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Enter vertex reshaping mode
+            setInteraction({
+              type: 'VERTEX_RESHAPING',
+              tId: t.id,
+              p1: t.p1,
+              p2: t.p2,
+              currentMouse: t.p3
+            });
+          }}
+          onDblTap={(e) => {
             e.evt.stopPropagation();
             // Enter vertex reshaping mode
             setInteraction({
@@ -1430,6 +1475,24 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             e.evt.preventDefault();
             handleContextMenu(e, 'edge', edge.id);
           }}
+          onTouchStart={(e) => {
+            const touch = e.evt.touches[0];
+            if (touch) {
+              startEntityLongPress('edge', edge.id, touch.clientX, touch.clientY);
+            }
+          }}
+          onDblTap={(e) => {
+            cancelLongPress();
+            e.evt.stopPropagation();
+            // Enter triangle placing mode from this edge
+            setInteraction({
+              type: 'STANDALONE_EDGE_PLACING',
+              edgeId: edge.id,
+              p1: edge.p1,
+              p2: edge.p2,
+              currentMouse: { id: generateId(), x: (edge.p1.x + edge.p2.x) / 2, y: edge.p1.y - 2 }
+            });
+          }}
         />
         {/* Visible edge */}
         <Line
@@ -1455,6 +1518,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
               currentMouse: edge.p1
             });
           }}
+          onDblTap={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p1,
+              currentMouse: edge.p1
+            });
+          }}
         />
         {/* Endpoint 2 - double-click to extend */}
         <Circle
@@ -1465,6 +1538,16 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           stroke="white"
           strokeWidth={2}
           onDblClick={(e) => {
+            e.evt.stopPropagation();
+            // Start extending from this endpoint
+            setInteraction({
+              type: 'EXTENDING_EDGE',
+              fromEdgeId: edge.id,
+              fromPoint: edge.p2,
+              currentMouse: edge.p2
+            });
+          }}
+          onDblTap={(e) => {
             e.evt.stopPropagation();
             // Start extending from this endpoint
             setInteraction({
@@ -1902,10 +1985,10 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
   const cursorStyle = interaction.type === 'PANNING' || interaction.type === 'EDGE_DRAGGING'
     ? 'grabbing'
     : interaction.type === 'MOVING_SELECTION'
-    ? 'move'
-    : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE' || interaction.type === 'SELECT_RECT')
-    ? 'crosshair'
-    : 'default';
+      ? 'move'
+      : (interaction.type === 'ROOT_PLACING_ORIGIN' || interaction.type === 'ROOT_PLACING_ANGLE' || interaction.type === 'SELECT_RECT')
+        ? 'crosshair'
+        : 'default';
 
   return (
     <div ref={containerRef} className="flex-1 h-full relative bg-slate-100 overflow-hidden select-none">
@@ -1928,7 +2011,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         style={{ cursor: cursorStyle, touchAction: 'none' }}
       >
         <Layer>
-          {renderGrid()}
+          <GridBackground
+            worldBounds={worldBounds}
+            worldToStage={worldToStage}
+            onBackgroundDblClick={handleBackgroundDblClick}
+          />
           {/* Render standalone edges */}
           {standaloneEdges.map((edge) => renderStandaloneEdge(edge))}
           {/* Render all triangle fills first (bottom layer) */}
@@ -1945,27 +2032,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         </Layer>
       </Stage>
 
-      <div className="absolute bottom-6 right-6 flex flex-col gap-2">
-        <button
-          onClick={() => handleZoomBtn('in')}
-          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
-        >
-          <ZoomIn size={20} />
-        </button>
-        <button
-          onClick={() => handleZoomBtn('out')}
-          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
-        >
-          <ZoomOut size={20} />
-        </button>
-        <button
-          onClick={handleFitView}
-          className="p-2 bg-white rounded-full shadow border border-slate-200 hover:bg-slate-50 text-slate-600"
-          title="Reset View"
-        >
-          <Maximize size={20} />
-        </button>
-      </div>
+      <CanvasControls
+        onZoomIn={() => handleZoomBtn('in')}
+        onZoomOut={() => handleZoomBtn('out')}
+        onFitView={handleFitView}
+      />
 
       <div className="absolute bottom-28 left-4 bg-white/80 backdrop-blur px-3 py-2 rounded shadow-sm text-[10px] text-slate-500 border border-slate-200 pointer-events-none">
         <p className="font-semibold mb-1">操作方法:</p>
@@ -2005,7 +2076,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             onChange={(e) => {
               const value = e.target.value;
               if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
-                setEditingDim({...editingDim, value: value});
+                setEditingDim({ ...editingDim, value: value });
               }
             }}
             onKeyDown={(e) => {
@@ -2061,7 +2132,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
             onChange={(e) => {
               const value = e.target.value;
               if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
-                setEditingEdgeDim({...editingEdgeDim, value: value});
+                setEditingEdgeDim({ ...editingEdgeDim, value: value });
               }
             }}
             onKeyDown={(e) => {
@@ -2098,196 +2169,84 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
 
       {/* Delete Confirmation Dialog */}
       {deleteConfirm && (
-        <div
-          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
-          onClick={() => setDeleteConfirm(null)}
-        >
-          <div
-            className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4 border border-slate-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center">
-                <span className="text-slate-600 text-xl">🗑</span>
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-slate-800">Delete {deleteConfirm.name}?</h3>
-                <p className="text-sm text-slate-500">This action cannot be undone</p>
-              </div>
-            </div>
-
-            {deleteConfirm.type === 'triangle' && (
-              <div className="bg-amber-50 border border-amber-200 rounded-md p-3 mb-4">
-                <p className="text-sm text-amber-700">
-                  <strong>Note:</strong> All triangles connected to {deleteConfirm.name} will also be deleted.
-                </p>
-              </div>
-            )}
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Type <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">del</span> to confirm:
-              </label>
-              <input
-                type="text"
-                value={deleteInput}
-                onChange={(e) => setDeleteInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && deleteInput.toLowerCase() === 'del') {
-                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
-                      onDeleteTriangle(deleteConfirm.id);
-                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
-                      onDeleteStandaloneEdge(deleteConfirm.id);
-                    }
-                    setDeleteConfirm(null);
-                    setDeleteInput('');
-                  } else if (e.key === 'Escape') {
-                    setDeleteConfirm(null);
-                  }
-                }}
-                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
-                placeholder="del"
-                autoFocus
-              />
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => setDeleteConfirm(null)}
-                className="flex-1 px-4 py-2 bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200 transition-colors font-medium"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (deleteInput.toLowerCase() === 'del') {
-                    if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
-                      onDeleteTriangle(deleteConfirm.id);
-                    } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
-                      onDeleteStandaloneEdge(deleteConfirm.id);
-                    }
-                    setDeleteConfirm(null);
-                    setDeleteInput('');
-                  }
-                }}
-                disabled={deleteInput.toLowerCase() !== 'del'}
-                className={`flex-1 px-4 py-2 rounded-md font-medium transition-colors ${
-                  deleteInput.toLowerCase() === 'del'
-                    ? 'bg-blue-600 text-white hover:bg-blue-700'
-                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                }`}
-              >
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
+        <DeleteConfirmationDialog
+          type={deleteConfirm.type}
+          name={deleteConfirm.name}
+          onConfirm={() => {
+            if (deleteConfirm.type === 'triangle' && onDeleteTriangle) {
+              onDeleteTriangle(deleteConfirm.id);
+            } else if (deleteConfirm.type === 'edge' && onDeleteStandaloneEdge) {
+              onDeleteStandaloneEdge(deleteConfirm.id);
+            }
+            setDeleteConfirm(null);
+          }}
+          onCancel={() => setDeleteConfirm(null)}
+        />
       )}
 
       {/* Debug Console */}
-      <div className="absolute bottom-0 left-0 right-0 h-24 bg-slate-900 text-green-400 font-mono text-xs overflow-y-auto border-t border-slate-700">
-        <div className="sticky top-0 bg-slate-800 px-2 py-1 flex justify-between items-center border-b border-slate-700">
-          <span className="text-slate-400">Debug: <span className="text-yellow-400">{interaction.type}</span> | Selected: <span className="text-cyan-400">{selectedIds.size}</span></span>
-          <button
-            onClick={() => setDebugLogs([])}
-            className="text-slate-500 hover:text-white px-2"
-          >
-            Clear
-          </button>
-        </div>
-        <div className="p-2 space-y-0.5">
-          {debugLogs.map((log, i) => (
-            <div key={i} className="whitespace-nowrap">{log}</div>
-          ))}
-          {debugLogs.length === 0 && <div className="text-slate-500">No logs...</div>}
-        </div>
-      </div>
+      <DebugConsole
+        interactionType={interaction.type}
+        selectedCount={selectedIds.size}
+        logs={debugLogs}
+        onClear={() => setDebugLogs([])}
+      />
 
-      {/* Context Menu */}
       {contextMenu && (
-        <div
-          className="fixed bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50 min-w-32"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={() => setContextMenu(null)}
-        >
-          {/* Move option - only show if something is selected or targeting a specific entity */}
-          {((contextMenu.targetType === 'selection' && selectedIds.size > 0) ||
-            (contextMenu.targetType === 'triangle' && contextMenu.targetId) ||
-            (contextMenu.targetType === 'edge' && contextMenu.targetId)) && (
-            <button
-              className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-blue-600"
-              onClick={(e) => {
-                e.stopPropagation();
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          targetType={contextMenu.targetType}
+          targetId={contextMenu.targetId}
+          selectedIds={selectedIds}
+          onClose={() => setContextMenu(null)}
+          onMove={(idsToMove) => {
+            // Update selectedIds for visual feedback
+            setSelectedIds(idsToMove);
 
-                // Determine the IDs to move
-                let idsToMove: Set<string>;
-                if (contextMenu.targetType === 'triangle' && contextMenu.targetId) {
-                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
-                } else if (contextMenu.targetType === 'edge' && contextMenu.targetId) {
-                  idsToMove = selectedIds.has(contextMenu.targetId) ? selectedIds : new Set([contextMenu.targetId]);
-                } else {
-                  idsToMove = selectedIds;
+            addLog(`Move clicked: idsToMove=${idsToMove.size}, ids=[${Array.from(idsToMove).join(',')}]`);
+
+            // Start moving mode - convert screen coordinates to world coordinates
+            const stage = stageRef.current;
+            const container = containerRef.current;
+            if (stage && container) {
+              const containerRect = container.getBoundingClientRect();
+              // Convert screen coordinates to stage-relative coordinates
+              const stageRelativeX = contextMenu.x - containerRect.left;
+              const stageRelativeY = contextMenu.y - containerRect.top;
+              // Convert to internal stage coordinates
+              const stageX = (stageRelativeX - stage.x()) / stage.scaleX();
+              const stageY = (stageRelativeY - stage.y()) / stage.scaleY();
+              const world = stageToWorld(stageX, stageY);
+              const startWorld: Point = { id: generateId(), x: world.x, y: world.y };
+              addLog(`Start MOVING_SELECTION: world=(${world.x.toFixed(2)}, ${world.y.toFixed(2)})`);
+              // Store targetIds in interaction to avoid async state issues
+              setInteraction({ type: 'MOVING_SELECTION', startWorld, currentWorld: startWorld, targetIds: idsToMove });
+            } else {
+              addLog(`Move failed: stage=${!!stage}, container=${!!container}`);
+            }
+            setContextMenu(null);
+          }}
+          onDelete={() => {
+            if (contextMenu.targetType === 'triangle' && contextMenu.targetId && onDeleteTriangle) {
+              const t = triangles.find(tri => tri.id === contextMenu.targetId);
+              setDeleteConfirm({ type: 'triangle', id: contextMenu.targetId, name: t?.name || 'Triangle' });
+            } else if (contextMenu.targetType === 'edge' && contextMenu.targetId && onDeleteStandaloneEdge) {
+              setDeleteConfirm({ type: 'edge', id: contextMenu.targetId, name: 'Edge' });
+            } else if (contextMenu.targetType === 'selection' && selectedIds.size > 0) {
+              // Delete all selected items
+              selectedIds.forEach(id => {
+                if (triangles.find(t => t.id === id)) {
+                  onDeleteTriangle?.(id);
+                } else if (standaloneEdges.find(e => e.id === id)) {
+                  onDeleteStandaloneEdge?.(id);
                 }
-
-                // Update selectedIds for visual feedback
-                setSelectedIds(idsToMove);
-
-                addLog(`Move clicked: idsToMove=${idsToMove.size}, ids=[${Array.from(idsToMove).join(',')}]`);
-
-                // Start moving mode - convert screen coordinates to world coordinates
-                const stage = stageRef.current;
-                const container = containerRef.current;
-                if (stage && container) {
-                  const containerRect = container.getBoundingClientRect();
-                  // Convert screen coordinates to stage-relative coordinates
-                  const stageRelativeX = contextMenu.x - containerRect.left;
-                  const stageRelativeY = contextMenu.y - containerRect.top;
-                  // Convert to internal stage coordinates
-                  const stageX = (stageRelativeX - stage.x()) / stage.scaleX();
-                  const stageY = (stageRelativeY - stage.y()) / stage.scaleY();
-                  const world = stageToWorld(stageX, stageY);
-                  const startWorld: Point = { id: generateId(), x: world.x, y: world.y };
-                  addLog(`Start MOVING_SELECTION: world=(${world.x.toFixed(2)}, ${world.y.toFixed(2)})`);
-                  // Store targetIds in interaction to avoid async state issues
-                  setInteraction({ type: 'MOVING_SELECTION', startWorld, currentWorld: startWorld, targetIds: idsToMove });
-                } else {
-                  addLog(`Move failed: stage=${!!stage}, container=${!!container}`);
-                }
-                setContextMenu(null);
-              }}
-            >
-              <span>✥</span>
-              <span>移動</span>
-            </button>
-          )}
-          {/* Delete option */}
-          <button
-            className="w-full px-4 py-2 text-left text-sm hover:bg-slate-100 flex items-center gap-2 text-red-600"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (contextMenu.targetType === 'triangle' && contextMenu.targetId && onDeleteTriangle) {
-                const t = triangles.find(tri => tri.id === contextMenu.targetId);
-                setDeleteConfirm({ type: 'triangle', id: contextMenu.targetId, name: t?.name || 'Triangle' });
-              } else if (contextMenu.targetType === 'edge' && contextMenu.targetId && onDeleteStandaloneEdge) {
-                setDeleteConfirm({ type: 'edge', id: contextMenu.targetId, name: 'Edge' });
-              } else if (contextMenu.targetType === 'selection' && selectedIds.size > 0) {
-                // Delete all selected items
-                selectedIds.forEach(id => {
-                  if (triangles.find(t => t.id === id)) {
-                    onDeleteTriangle?.(id);
-                  } else if (standaloneEdges.find(e => e.id === id)) {
-                    onDeleteStandaloneEdge?.(id);
-                  }
-                });
-                setSelectedIds(new Set());
-              }
-              setContextMenu(null);
-            }}
-          >
-            <span>🗑</span>
-            <span>削除</span>
-          </button>
-        </div>
+              });
+              setSelectedIds(new Set());
+            }
+            setContextMenu(null);
+          }}
+        />
       )}
 
       {/* Click outside to close context menu */}

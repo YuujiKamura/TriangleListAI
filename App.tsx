@@ -512,52 +512,52 @@ const App: React.FC = () => {
   return (
     <div className="flex flex-col h-screen bg-slate-100">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shadow-sm z-20">
-        <div className="flex items-center gap-2">
-          <div className="bg-blue-600 p-1.5 rounded text-white">
-            <Calculator size={18} />
+      <header className="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between shadow-sm z-20">
+        <div className="flex items-center gap-3">
+          <div className="bg-blue-600 p-2 rounded-lg text-white shadow-sm">
+            <Calculator size={20} />
           </div>
           <div>
-            <h1 className="text-sm font-bold text-slate-800">TriangleList</h1>
+            <h1 className="text-base font-bold text-slate-800">TriangleList</h1>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
           <button
             onClick={handleUndo}
             disabled={history.length === 0}
-            className="text-xs text-slate-600 font-medium px-2 py-1 hover:bg-slate-100 rounded transition-colors flex items-center gap-1 disabled:opacity-40"
+            className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-40 active:scale-95"
             title="元に戻す (Ctrl+Z)"
           >
-            <Undo2 size={14} />
+            <Undo2 size={20} />
           </button>
           <button
             onClick={() => downloadDXF(geometry.triangles)}
-            className="text-xs text-green-600 font-medium px-2 py-1 hover:bg-green-50 rounded transition-colors flex items-center gap-1"
+            className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors active:scale-95"
             title="DXF出力"
           >
-            <Download size={14} />
+            <Download size={20} />
           </button>
           <button
             onClick={handleClear}
-            className="text-xs text-red-600 font-medium px-2 py-1 hover:bg-red-50 rounded transition-colors"
+            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors active:scale-95"
           >
-            Clear
+            <RefreshCw size={20} />
           </button>
-          <div className="bg-slate-100 px-2 py-1 rounded text-xs font-mono text-slate-600 border border-slate-200 ml-1">
-            Area: <span className="font-bold text-slate-900">{totalArea.toFixed(2)}</span>
+          <div className="bg-slate-100 px-3 py-1.5 rounded-md text-sm font-mono text-slate-600 border border-slate-200 ml-2">
+            <span className="font-bold text-slate-900">{totalArea.toFixed(2)}</span> m²
           </div>
         </div>
       </header>
 
-      {/* Triangle List - Fixed height at top */}
+      {/* Triangle List - Horizontal scroll */}
       <div className="bg-white border-b border-slate-200 shadow-sm z-10">
-        <div className="h-24 overflow-y-auto">
+        <div className="overflow-x-auto whitespace-nowrap py-3 px-2 no-scrollbar">
           {defs.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-              三角形がありません。キャンバスをダブルクリックしてエッジを作成してください。
+            <div className="flex items-center justify-center text-slate-400 text-sm py-2">
+              キャンバスをダブルタップしてエッジを作成
             </div>
           ) : (
-            <div className="flex flex-wrap gap-1 p-2">
+            <div className="flex gap-2">
               {defs.map(def => {
                 const isSelected = selectedTriangleId === def.id;
                 const parentName = getParentName(def);
@@ -565,19 +565,18 @@ const App: React.FC = () => {
                   <button
                     key={def.id}
                     onClick={() => setSelectedTriangleId(isSelected ? null : def.id)}
-                    className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
-                      isSelected
-                        ? 'bg-blue-100 border-blue-400 text-blue-800'
+                    className={`flex-shrink-0 px-3 py-2 rounded-lg text-sm font-medium border transition-all active:scale-95 ${isSelected
+                        ? 'bg-blue-100 border-blue-400 text-blue-800 shadow-sm'
                         : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                    }`}
+                      }`}
                   >
                     <span className="font-bold">{def.name}</span>
                     {def.isRoot ? (
-                      <span className="text-slate-500 ml-1">
+                      <span className="text-slate-500 ml-1 text-xs">
                         ({def.sideA}/{def.sideB}/{def.sideC})
                       </span>
                     ) : (
-                      <span className="text-slate-500 ml-1">
+                      <span className="text-slate-500 ml-1 text-xs">
                         ← {parentName} ({def.sideLeft}/{def.sideRight})
                       </span>
                     )}
