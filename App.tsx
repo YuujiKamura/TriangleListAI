@@ -687,7 +687,7 @@ const App: React.FC = () => {
 
       <div className="flex-1 flex overflow-hidden relative">
         
-        {/* Left: Canvas Area */}
+        {/* Canvas Area - Always full width */}
         <div className="flex-1 flex flex-col relative bg-slate-100">
           <GeometryCanvas
             triangles={geometry.triangles}
@@ -733,9 +733,12 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Right: Collapsible Sidebar */}
-        <div className={`${sidebarOpen ? 'w-96' : 'w-0'} bg-white border-l border-slate-200 flex flex-col shadow-xl z-20 transition-all duration-300 overflow-hidden`}>
-          {sidebarOpen && (
+        {/* Right: Collapsible Sidebar - Overlay style for full canvas when closed */}
+        <div
+          className={`absolute top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-xl z-20 transition-transform duration-300 ease-in-out w-96 max-w-[85vw] ${sidebarOpen ? 'translate-x-0' : 'translate-x-full'}`}
+        >
+          {/* Sidebar content always rendered but hidden via transform */}
+          <div className={`flex flex-col h-full ${sidebarOpen ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
             <>
               {/* Input Area (Dynamic) */}
               {inputMode && inputSubmit ? (
@@ -816,14 +819,15 @@ const App: React.FC = () => {
                 )}
               </div>
             </>
-          )}
+          </div>
         </div>
 
-        {/* Sidebar Toggle Button */}
+        {/* Sidebar Toggle Button - Positioned at sidebar edge */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="absolute right-0 top-1/2 -translate-y-1/2 bg-white border border-slate-200 rounded-l-md p-2 shadow-md hover:bg-slate-50 z-30"
-          style={{ right: sidebarOpen ? '384px' : '0' }}
+          className="absolute top-1/2 -translate-y-1/2 bg-white border border-slate-200 rounded-l-md p-2 shadow-md hover:bg-slate-50 z-30 transition-all duration-300 ease-in-out"
+          style={{ right: sidebarOpen ? 'min(384px, 85vw)' : '0' }}
+          aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
         >
           {sidebarOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </button>
