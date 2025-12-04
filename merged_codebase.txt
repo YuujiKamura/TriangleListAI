@@ -1,5 +1,5 @@
 # TriangleListAI - Merged Codebase for AI Analysis
-# Generated: Thu, Dec  4, 2025  3:14:34 PM
+# Generated: Thu, Dec  4, 2025  3:28:30 PM
 # This file is for AI Studio import. Original files are preserved.
 
 //===============================================================================
@@ -1509,8 +1509,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           const world = stageToWorld(stageX, stageY);
           const startPoint: Point = { id: generateId(), x: world.x, y: world.y };
           // Start drawing edge on double tap
+          addLog(`DoubleTap: Starting DRAWING_EDGE at (${world.x.toFixed(1)}, ${world.y.toFixed(1)})`);
           setInteraction({ type: 'DRAWING_EDGE', startPoint, currentMouse: startPoint });
         }
+        // Don't return - let the touch continue to track movement
+        // The finger is still down, so we want subsequent touchmove to update the edge
         return;
       }
     }
@@ -1522,7 +1525,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     const isBackground = e.target.name() === 'background-rect' || e.target === e.target.getStage();
 
     if (!isBackground) {
-      // e.evt.preventDefault(); // Commented out to allow scrolling if needed, but usually we want to prevent it for drag
+      e.evt.preventDefault(); // Prevent scrolling when touching shapes
     }
 
     // Convert touch event to mouse-like event for reuse
@@ -1595,6 +1598,85 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setTimeout(() => {
       isTouchRef.current = false;
     }, 100);
+
+    addLog(`TouchEnd: interaction.type=${interaction.type}`);
+
+    // Handle confirmation for touch-based interactions
+    // On mobile, lifting finger should confirm the action (like clicking on desktop)
+    if (interaction.type === 'DRAWING_EDGE') {
+      if (onAddStandaloneEdge) {
+        const { startPoint, currentMouse } = interaction;
+        const snappedMouse = applySnap(currentMouse, [startPoint]);
+        const len = distance(startPoint, snappedMouse);
+        addLog(`TouchEnd DRAWING_EDGE: len=${len.toFixed(2)}`);
+        if (len > 0.1) {
+          onAddStandaloneEdge(startPoint, snappedMouse);
+        }
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    if (interaction.type === 'PHANTOM_PLACING') {
+      if (onAddAttachedTriangle) {
+        const { p1, p2, currentMouse, tId, index } = interaction;
+        const isOccupied = occupiedEdges?.has(`${tId}-${index}`) || false;
+        if (!isOccupied) {
+          const snappedMouse = applySnap(currentMouse, [p1, p2]);
+          const sideLeft = distance(p1, snappedMouse);
+          const sideRight = distance(p2, snappedMouse);
+          const flip = isFlipSide(p1, p2, snappedMouse);
+          if (sideLeft > 0 && sideRight > 0) {
+            onAddAttachedTriangle(tId, index, sideLeft, sideRight, flip);
+          }
+        }
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    if (interaction.type === 'STANDALONE_EDGE_PLACING') {
+      if (onAddTriangleFromEdge) {
+        const { edgeId, p1, p2, currentMouse } = interaction;
+        const snappedMouse = applySnap(currentMouse, [p1, p2]);
+        const sideLeft = distance(p1, snappedMouse);
+        const sideRight = distance(p2, snappedMouse);
+        const flip = isFlipSide(p1, p2, snappedMouse);
+        if (sideLeft > 0 && sideRight > 0) {
+          onAddTriangleFromEdge(edgeId, sideLeft, sideRight, flip);
+        }
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    if (interaction.type === 'VERTEX_RESHAPING') {
+      if (onVertexReshape) {
+        const { p1, p2, currentMouse, tId } = interaction;
+        const snappedMouse = applySnap(currentMouse, [p1, p2]);
+        const sideLeft = distance(p1, snappedMouse);
+        const sideRight = distance(p2, snappedMouse);
+        const flip = isFlipSide(p1, p2, snappedMouse);
+        if (sideLeft > 0 && sideRight > 0) {
+          onVertexReshape(tId, sideLeft, sideRight, flip);
+        }
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
+
+    if (interaction.type === 'EXTENDING_EDGE') {
+      if (onAddStandaloneEdge) {
+        const { fromPoint, currentMouse } = interaction;
+        const snappedMouse = applySnap(currentMouse, [fromPoint]);
+        const len = distance(fromPoint, snappedMouse);
+        if (len > 0.1) {
+          onAddStandaloneEdge(fromPoint, snappedMouse);
+        }
+      }
+      setInteraction({ type: 'IDLE' });
+      return;
+    }
 
     handleMouseUp();
   };
