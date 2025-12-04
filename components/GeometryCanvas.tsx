@@ -780,6 +780,56 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
     setStagePosition(newPos);
   };
 
+  // Touch event handlers for mobile support
+  const handleTouchStart = (e: Konva.KonvaEventObject<TouchEvent>) => {
+    e.evt.preventDefault();
+    const touch = e.evt.touches[0];
+    if (!touch) return;
+
+    // Convert touch event to mouse-like event for reuse
+    const fakeEvt = {
+      button: 0,
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      stopPropagation: () => {},
+      preventDefault: () => {}
+    };
+
+    // Create a fake mouse event object
+    const fakeEvent = {
+      ...e,
+      evt: fakeEvt as unknown as MouseEvent
+    } as unknown as Konva.KonvaEventObject<MouseEvent>;
+
+    handleMouseDown(fakeEvent);
+  };
+
+  const handleTouchMove = (e: Konva.KonvaEventObject<TouchEvent>) => {
+    e.evt.preventDefault();
+    const touch = e.evt.touches[0];
+    if (!touch) return;
+
+    const fakeEvt = {
+      button: 0,
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      stopPropagation: () => {},
+      preventDefault: () => {}
+    };
+
+    const fakeEvent = {
+      ...e,
+      evt: fakeEvt as unknown as MouseEvent
+    } as unknown as Konva.KonvaEventObject<MouseEvent>;
+
+    handleMouseMove(fakeEvent);
+  };
+
+  const handleTouchEnd = (e: Konva.KonvaEventObject<TouchEvent>) => {
+    e.evt.preventDefault();
+    handleMouseUp();
+  };
+
   const handleZoomBtn = (direction: 'in' | 'out') => {
     if (!stageRef.current) return;
     
@@ -1779,8 +1829,11 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
         onWheel={handleWheel}
-        style={{ cursor: cursorStyle }}
+        style={{ cursor: cursorStyle, touchAction: 'none' }}
       >
         <Layer>
           {renderGrid()}
