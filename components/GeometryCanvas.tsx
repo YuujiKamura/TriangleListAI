@@ -1528,8 +1528,9 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
         {/* Hit area for double-click on edge body (to create triangle) and long press for context menu */}
         <Line
           points={[sp1.x, sp1.y, sp2.x, sp2.y]}
-          stroke="transparent"
+          stroke="rgba(0,0,0,0.001)"
           strokeWidth={20}
+          hitStrokeWidth={20}
           onMouseDown={(e) => {
             if (e.evt.button === 0) {
               startEntityLongPress('edge', edge.id, e.evt.clientX, e.evt.clientY);
@@ -1543,6 +1544,7 @@ const GeometryCanvas: React.FC<GeometryCanvasProps> = ({
           }}
           onClick={(e) => {
             e.evt.stopPropagation();
+            addLog(`Edge onClick: ${edge.id}`);
             // Select/deselect edge on click
             setSelectedIds(prev => {
               const newSet = new Set(prev);
